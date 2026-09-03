@@ -23,7 +23,7 @@ import re
 import sys
 import threading
 import time
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -35,8 +35,19 @@ ICON = "⇄"
 REFRESH_CHOICES: tuple[int, ...] = (30, 60, 300)
 AUTO_THRESHOLD_CHOICES: tuple[int, ...] = (80, 90, 95, 98)
 TITLE_PCT_CHOICES: tuple[str, ...] = ("off", "5h", "7d", "both")
+# Per-account title override adds "default" (defer to the global title_pct) to
+# the same window choices; anything else falls back to the global setting.
+ACCOUNT_PCT_CHOICES: tuple[str, ...] = ("default", *TITLE_PCT_CHOICES)
 SWITCH_HISTORY_LIMIT = 10
 NOTIFICATION_BUNDLE_ID = "com.claude-swap.menubar"
+
+# Battery-drain gauge (issue: "battery drain style percentage"): a segmented
+# bar of *remaining* quota — fuller means more headroom, and it drains toward
+# empty as utilization climbs, the way a battery does.
+GAUGE_FULL = "▰"
+GAUGE_EMPTY = "▱"
+GAUGE_CELLS = 5
+SESSION_WINDOW_S = 5 * 3600  # the 5h session window's fixed span (for schedule)
 
 
 def ensure_notification_identity(
@@ -95,6 +106,14 @@ class MenuBarSettings:
     show_account_name: bool = True
     title_pct: str = "both"  # one of TITLE_PCT_CHOICES
     title_scoped: bool = False  # append per-model weekly limits (e.g. Fable) to the title
+    show_icon: bool = True  # show the ⇄ glyph in the menu-bar title
+    title_battery: bool = False  # append a battery-drain gauge for the binding window
+    # Per-account override of ``title_pct`` for when that account is active,
+    # keyed by email (stable across slot renumbering): email -> a
+    # TITLE_PCT_CHOICES value. Absent / "default" defers to the global
+    # ``title_pct``. Lets one account show only its weekly limit while another
+    # shows both, etc. (issue: hide weekly/session percentage per account).
+    account_pct: dict = field(default_factory=dict)
     refresh_interval: int = 60
     auto_switch_enabled: bool = False
 
@@ -165,6 +184,20 @@ def _resets_at_ts(window: dict | str | None) -> float:
     return float("inf")
 
 
+def _fmt_duration(seconds: int) -> str | None:
+    """Coarse ``d h``/``h m``/``m`` duration, or None for non-positive spans."""
+    if seconds <= 0:
+        return None
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes = rem // 60
+    if days > 0:
+        return f"{days}d {hours}h"
+    if hours > 0:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
 def _live_countdown(window: dict | str | None, now: float) -> str | None:
     """Time until a usage window resets, computed live from ``resets_at``.
 
@@ -176,17 +209,39 @@ def _live_countdown(window: dict | str | None, now: float) -> str | None:
     ts = _resets_at_ts(window)
     if ts == float("inf"):
         return None
-    remaining = int(ts - now)
-    if remaining <= 0:
+    return _fmt_duration(int(ts - now))
+
+
+def format_gauge(pct: float | None, cells: int = GAUGE_CELLS) -> str:
+    """A segmented battery-drain gauge for a utilization percentage.
+
+    Shows *remaining* quota: a fuller bar means more headroom, and it drains
+    toward empty as ``pct`` climbs — the battery metaphor the Claude usage
+    menu-bar apps use. ``None`` (unknown usage) yields an all-empty gauge.
+    """
+    if not isinstance(pct, (int, float)):
+        return GAUGE_EMPTY * cells
+    remaining = max(0.0, min(100.0, 100.0 - float(pct)))
+    filled = max(0, min(cells, round(remaining / 100.0 * cells)))
+    return GAUGE_FULL * filled + GAUGE_EMPTY * (cells - filled)
+
+
+def _binding_pct(usage: dict | str | None, now: float) -> float | None:
+    """Highest 5h/7d utilization after rolling a passed weekly reset to 0%.
+
+    Like :func:`tightest_pct` but reflects a weekly window that has already
+    rolled over, so the gauge doesn't read empty on a stale-but-reset week.
+    """
+    if not isinstance(usage, dict):
         return None
-    days, rem = divmod(remaining, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes = rem // 60
-    if days > 0:
-        return f"{days}d {hours}h"
-    if hours > 0:
-        return f"{hours}h {minutes}m"
-    return f"{minutes}m"
+    pcts: list[float] = []
+    p5 = _window_pct(usage, "five_hour")
+    if p5 is not None:
+        pcts.append(p5)
+    seven = _rolled_weekly_window(usage.get("seven_day"), now)
+    if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)):
+        pcts.append(float(seven["pct"]))
+    return max(pcts) if pcts else None
 
 
 _WEEKLY_PERIOD_S = 7 * 86400  # weekly limits reset on a fixed 7-day cadence
@@ -273,19 +328,163 @@ def usage_summary(
     return " · ".join(parts) if parts else "usage unavailable"
 
 
-def format_account_label(
+def _session_summary(usage: dict | str | None, now: float) -> str:
+    """The session (5h) line for an account row header.
+
+    Falls back to the weekly window, then to the sentinel/None note, so the
+    header always says something even when the 5h window is absent.
+    """
+    if isinstance(usage, str):
+        return usage
+    if not isinstance(usage, dict):
+        return "usage unavailable"
+    for key, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        window = usage.get(key)
+        if key == "seven_day":
+            window = _rolled_weekly_window(window, now)
+        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
+            seg = f"{label} {window['pct']:.0f}%"
+            countdown = _live_countdown(window, now)
+            if countdown:
+                seg += f" ({countdown})"
+            return seg
+    return "usage unavailable"
+
+
+def format_account_header(
     num,
     email: str,
     usage: dict | str | None,
     now: float | None = None,
     alias: str | None = None,
     disabled: bool = False,
-    fetched_at: float | None = None,
+    is_active: bool = False,
+    show_gauge: bool = True,
 ) -> str:
-    """Build one account row's menu label."""
-    label = f"{alias}  ({email})" if alias else email
-    marker = "  (disabled)" if disabled else ""
-    return f"{num}  {label}{marker}  {usage_summary(usage, now, fetched_at)}"
+    """The account row's submenu parent: profile name, gauge, session summary.
+
+    Concise by design — full per-window detail (email, account number, reset
+    times, overage) lives in the submenu revealed on hover; see
+    :func:`account_detail_lines`. Active rows get a ● marker because a submenu
+    parent doesn't render the native check-mark reliably.
+    """
+    if now is None:
+        now = time.time()
+    name = f"{alias}  ({email})" if alias else email
+    active_marker = "● " if is_active else ""
+    disabled_marker = "  (disabled)" if disabled else ""
+    gauge = ""
+    if show_gauge:
+        bp = _binding_pct(usage, now)
+        if bp is not None:
+            gauge = format_gauge(bp) + "  "
+    return f"{active_marker}{num}  {name}{disabled_marker}  {gauge}{_session_summary(usage, now)}"
+
+
+def session_schedule_line(window: dict | str | None, now: float) -> str | None:
+    """A session-window schedule line: when it started and when it resets.
+
+    Derived from the 5h window's ``resets_at`` (start = ``resets_at`` − 5h), so
+    it reflects the live schedule of the current session block. Appends the
+    absolute reset clock when the window carries one. ``None`` when there's no
+    parseable ``resets_at`` (nothing to schedule).
+    """
+    ts = _resets_at_ts(window)
+    if ts == float("inf"):
+        return None
+    parts: list[str] = []
+    started = _fmt_duration(int(now - (ts - SESSION_WINDOW_S)))
+    if started:
+        parts.append(f"started {started} ago")
+    remaining = _fmt_duration(int(ts - now))
+    if remaining:
+        seg = f"resets in {remaining}"
+        clock = window.get("clock") if isinstance(window, dict) else None
+        if clock:
+            seg += f" ({clock})"
+        parts.append(seg)
+    if not parts:
+        return None
+    return "Session " + " · ".join(parts)
+
+
+def account_detail_lines(
+    num,
+    email: str,
+    usage: dict | str | None,
+    now: float | None = None,
+    fetched_at: float | None = None,
+) -> list[str]:
+    """Hover-revealed detail rows for an account's submenu.
+
+    Email, account number, per-window utilization with live reset countdowns,
+    the session schedule (start/reset), per-model weekly limits, and any
+    overage spend — the "more detail" the flat row can't hold.
+    """
+    if now is None:
+        now = time.time()
+    lines = [f"Email: {email}", f"Account: #{num}"]
+    if isinstance(usage, str):  # sentinel note (token expired / api key / …)
+        lines.append(usage)
+        return lines
+    if not isinstance(usage, dict):
+        lines.append("Usage unavailable")
+        return lines
+
+    five = usage.get("five_hour")
+    if isinstance(five, dict) and isinstance(five.get("pct"), (int, float)):
+        seg = f"Session (5h): {five['pct']:.0f}%"
+        countdown = _live_countdown(five, now)
+        if countdown:
+            seg += f" · resets in {countdown}"
+        lines.append(seg)
+        schedule = session_schedule_line(five, now)
+        if schedule:
+            lines.append(f"   {schedule}")
+
+    seven = _rolled_weekly_window(usage.get("seven_day"), now)
+    if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)):
+        pace_result = pace.compute_pace(seven, fetched_at=fetched_at)
+        seg = f"Weekly (7d): {seven['pct']:.0f}%"
+        if pace_result and pace_result.ahead:
+            seg += " (ahead)"
+        countdown = _live_countdown(seven, now)
+        if countdown:
+            seg += f" · resets in {countdown}"
+        lines.append(seg)
+
+    for window in usage.get("scoped") or []:
+        window = _rolled_weekly_window(window, now)
+        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
+            seg = f"{window['name']}: {window['pct']:.0f}%"
+            if window["pct"] >= 100:
+                seg += " (maxed)"
+            countdown = _live_countdown(window, now)
+            if countdown:
+                seg += f" · resets in {countdown}"
+            lines.append(seg)
+
+    spend = usage.get("spend")
+    if isinstance(spend, dict):
+        used, limit = spend.get("used"), spend.get("limit")
+        if isinstance(used, (int, float)) and isinstance(limit, (int, float)):
+            lines.append(f"Overage: ${used:.2f} / ${limit:.2f}")
+        elif isinstance(spend.get("pct"), (int, float)):
+            lines.append(f"Overage: {spend['pct']:.0f}%")
+    return lines
+
+
+def account_title_pct(settings: MenuBarSettings, email: str | None) -> str | None:
+    """The per-account title-percentage override for ``email``, or ``None``.
+
+    ``None`` (absent, "default", or an unrecognized value) means defer to the
+    global ``title_pct``. Sanitizes the stored map so a hand-edited settings
+    file can't feed ``format_title`` a bogus choice.
+    """
+    if not email or not isinstance(settings.account_pct, dict):
+        return None
+    choice = settings.account_pct.get(email)
+    return choice if choice in TITLE_PCT_CHOICES else None
 
 
 def _local_part(email: str, limit: int = 12) -> str:
@@ -302,20 +501,27 @@ def format_title(
     settings: MenuBarSettings,
     now: float | None = None,
     alias: str | None = None,
+    pct_override: str | None = None,
 ) -> str:
-    """Build the menu-bar title from the active account and settings."""
+    """Build the menu-bar title from the active account and settings.
+
+    ``pct_override`` is the active account's per-account title-percentage
+    choice (one of ``TITLE_PCT_CHOICES``); when given it wins over
+    ``settings.title_pct``, so different accounts can show different windows.
+    """
     if active_email is None:
         return ICON
     if now is None:
         now = time.time()
+    title_pct = pct_override if pct_override in TITLE_PCT_CHOICES else settings.title_pct
     segments: list[str] = []
     if settings.show_account_name:
         segments.append(alias if alias else _local_part(active_email))
-    if settings.title_pct in ("5h", "both"):
+    if title_pct in ("5h", "both"):
         p = _window_pct(active_usage, "five_hour")
         if p is not None:
             segments.append(f"{p:.0f}%")
-    if settings.title_pct in ("7d", "both"):
+    if title_pct in ("7d", "both"):
         seven = active_usage.get("seven_day") if isinstance(active_usage, dict) else None
         seven = _rolled_weekly_window(seven, now)  # reflect a passed weekly reset
         p = seven["pct"] if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)) else None
@@ -328,9 +534,18 @@ def format_title(
             window = _rolled_weekly_window(window, now)
             if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
                 segments.append(f"{window['name']} {window['pct']:.0f}%")
+    if settings.title_battery:
+        bp = _binding_pct(active_usage, now)
+        if bp is not None:
+            segments.append(format_gauge(bp))
+    icon = ICON if settings.show_icon else ""
     if not segments:
+        # Never leave the status item blank: an all-off title still needs a
+        # clickable glyph, so fall back to the icon even when it's hidden.
         return ICON
-    return f"{ICON} " + " · ".join(segments)
+    if not icon:
+        return " · ".join(segments)
+    return f"{icon} " + " · ".join(segments)
 
 
 def format_usage_log(email: str, usage: dict | str | None) -> str | None:
@@ -463,7 +678,13 @@ def run(switcher) -> int:
     )
 
     from claude_swap.autoswitch import AutoSwitchEngine
-    from claude_swap.settings import load_settings, set_setting
+    from claude_swap.settings import (
+        load_per_account_thresholds,
+        load_settings,
+        set_per_account_threshold,
+        set_setting,
+        unset_per_account_threshold,
+    )
     from claude_swap.snapshot_source import SnapshotSource
 
     settings_path = switcher.backup_dir / "menubar_settings.json"
@@ -648,11 +869,13 @@ def run(switcher) -> int:
 
         # ---- menu construction -----------------------------------------------
         def rebuild_menu(self):
+            active_email = self.snapshot["active_email"]
             self.title = format_title(
-                self.snapshot["active_email"],
+                active_email,
                 self.snapshot["active_usage"],
                 self.settings,
                 alias=self.snapshot.get("active_alias"),
+                pct_override=account_title_pct(self.settings, active_email),
             )
             # Stop a rumps memory leak: rumps registers each menu item's callback
             # in the process-global NSApp._ns_to_py_and_callback, but Menu.clear()
@@ -676,34 +899,59 @@ def run(switcher) -> int:
             self.menu.clear()
             account_items = []
             for num, email, is_active, display, _last_good, alias, disabled, fetched_at in self.snapshot["accounts"]:
+                # Each row is a submenu: the parent shows the concise header,
+                # hovering reveals the full detail plus the per-account actions.
                 item = rumps.MenuItem(
-                    format_account_label(
-                        num, email, display, alias=alias, disabled=disabled, fetched_at=fetched_at
-                    ),
-                    callback=self._make_switch_to(num),
+                    format_account_header(
+                        num, email, display, alias=alias, disabled=disabled,
+                        is_active=is_active,
+                    )
                 )
                 item.state = 1 if is_active else 0
+                item.add(rumps.MenuItem("Switch to this account", callback=self._make_switch_to(num)))
+                item.add(None)
+                for line in account_detail_lines(num, email, display, fetched_at=fetched_at):
+                    item.add(rumps.MenuItem(line, callback=None))
+                item.add(None)
+                item.add(self._account_title_menu(rumps, email))
+                item.add(self._account_threshold_menu(rumps, email))
                 account_items.append(item)
             if not account_items:
                 account_items.append(rumps.MenuItem("No managed accounts", callback=None))
 
+            # Keep the top level short: the account rows, then just three
+            # grouping submenus and Quit. Everything else lives one (or two)
+            # hover levels deeper.
             self.menu = [
                 *account_items,
                 None,
-                rumps.MenuItem("Rotate to next", callback=self._switch(None)),
-                rumps.MenuItem("Switch to best", callback=self._switch("best")),
-                rumps.MenuItem("Next available", callback=self._switch("next-available")),
-                None,
-                self._add_menu(rumps),
-                self._disable_menu(rumps),
-                self._remove_menu(rumps),
-                rumps.MenuItem("Refresh current credentials", callback=self.on_refresh_creds),
-                self._history_menu(rumps),
-                None,
+                self._switch_menu(rumps),
+                self._manage_menu(rumps),
                 self._settings_menu(rumps),
-                rumps.MenuItem("Refresh now", callback=self.on_refresh_now),
+                None,
                 rumps.MenuItem("Quit", callback=self.on_quit),
             ]
+
+        def _switch_menu(self, rumps):
+            """Switching actions + the recent-switch history (sub-sub-menu)."""
+            menu = rumps.MenuItem("Switch")
+            menu.add(rumps.MenuItem("Rotate to next", callback=self._switch(None)))
+            menu.add(rumps.MenuItem("Switch to best", callback=self._switch("best")))
+            menu.add(rumps.MenuItem("Next available", callback=self._switch("next-available")))
+            menu.add(None)
+            menu.add(self._history_menu(rumps))
+            return menu
+
+        def _manage_menu(self, rumps):
+            """Account lifecycle + refresh actions, grouped off the top level."""
+            menu = rumps.MenuItem("Manage accounts")
+            menu.add(self._add_menu(rumps))
+            menu.add(self._disable_menu(rumps))
+            menu.add(self._remove_menu(rumps))
+            menu.add(None)
+            menu.add(rumps.MenuItem("Refresh credentials", callback=self.on_refresh_creds))
+            menu.add(rumps.MenuItem("Refresh usage now", callback=self.on_refresh_now))
+            return menu
 
         def _add_menu(self, rumps):
             menu = rumps.MenuItem("Add account")
@@ -754,6 +1002,40 @@ def run(switcher) -> int:
             menu.add(rumps.MenuItem("Open full log…", callback=self.on_open_log))
             return menu
 
+        def _account_title_menu(self, rumps, email):
+            """Per-account override of which percentages show in the title."""
+            menu = rumps.MenuItem("Show in menu-bar title")
+            current = self.settings.account_pct.get(email, "default")
+            labels = {"default": "Default (global)", "off": "None",
+                      "5h": "Session (5h)", "7d": "Weekly (7d)", "both": "Both (5h · 7d)"}
+            for choice in ACCOUNT_PCT_CHOICES:
+                it = rumps.MenuItem(labels[choice], callback=self._make_account_pct(email, choice))
+                it.state = 1 if current == choice else 0
+                menu.add(it)
+            return menu
+
+        def _account_threshold_menu(self, rumps, email):
+            """Per-account override of the auto-switch-away threshold.
+
+            Lets a secondary account keep being used up to its own limit before
+            the engine switches away, instead of the global threshold.
+            """
+            menu = rumps.MenuItem("Auto-swap away at")
+            try:
+                current = load_per_account_thresholds(self.switcher.backup_dir).get(email)
+            except Exception:
+                current = None
+            default_item = rumps.MenuItem(
+                "Default (global)", callback=self._make_account_threshold(email, None)
+            )
+            default_item.state = 1 if current is None else 0
+            menu.add(default_item)
+            for pct in AUTO_THRESHOLD_CHOICES:
+                it = rumps.MenuItem(f"{pct}%", callback=self._make_account_threshold(email, pct))
+                it.state = 1 if current == pct else 0
+                menu.add(it)
+            return menu
+
         def _settings_menu(self, rumps):
             menu = rumps.MenuItem("Settings")
             name_item = rumps.MenuItem("Show account name in menu bar", callback=self.on_toggle_name)
@@ -774,6 +1056,18 @@ def run(switcher) -> int:
             )
             scoped_item.state = 1 if self.settings.title_scoped else 0
             menu.add(scoped_item)
+
+            battery_item = rumps.MenuItem(
+                "Battery gauge in title", callback=self.on_toggle_battery
+            )
+            battery_item.state = 1 if self.settings.title_battery else 0
+            menu.add(battery_item)
+
+            icon_item = rumps.MenuItem(
+                f"Show swap icon ({ICON})", callback=self.on_toggle_icon
+            )
+            icon_item.state = 1 if self.settings.show_icon else 0
+            menu.add(icon_item)
 
             interval = rumps.MenuItem("Refresh interval")
             labels = {30: "30 seconds", 60: "60 seconds", 300: "5 minutes"}
@@ -929,10 +1223,44 @@ def run(switcher) -> int:
             self.settings.title_scoped = not self.settings.title_scoped
             self._save_and_rebuild()
 
+        def on_toggle_battery(self, _sender):
+            self.settings.title_battery = not self.settings.title_battery
+            self._save_and_rebuild()
+
+        def on_toggle_icon(self, _sender):
+            self.settings.show_icon = not self.settings.show_icon
+            self._save_and_rebuild()
+
         def _make_title_pct(self, mode):
             def cb(_sender):
                 self.settings.title_pct = mode
                 self._save_and_rebuild()
+            return cb
+
+        def _make_account_pct(self, email, choice):
+            def cb(_sender):
+                if choice == "default":
+                    self.settings.account_pct.pop(email, None)
+                else:
+                    self.settings.account_pct[email] = choice
+                self._save_and_rebuild()
+            return cb
+
+        def _make_account_threshold(self, email, pct):
+            # Core auto-switch policy (shared with `cswap auto`), so it lives in
+            # settings.json, not the menu bar's own prefs — restart the engine to
+            # apply it immediately when running.
+            def cb(_sender):
+                try:
+                    if pct is None:
+                        unset_per_account_threshold(self.switcher.backup_dir, email)
+                    else:
+                        set_per_account_threshold(self.switcher.backup_dir, email, pct)
+                except Exception as e:
+                    rumps.alert(title="claude-swap", message=f"Couldn't set limit: {e}")
+                    return
+                self._restart_engine()
+                self.rebuild_menu()
             return cb
 
         def _make_interval(self, secs):
