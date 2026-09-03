@@ -606,6 +606,46 @@ class TestDecisionTable:
         assert harness.engine._next_delay(outcome) == NO_RESET_FALLBACK_S
 
 
+class TestPerAccountThreshold:
+    """A per-account switch-away threshold overrides the global one for the
+    *active* account only — lean on a secondary account up to its own limit."""
+
+    def _harness(self, temp_home: Path, **kwargs) -> EngineHarness:
+        h = EngineHarness(temp_home, **kwargs)
+        h.seed(1, "a@example.com")
+        h.seed(2, "b@example.com")
+        h.seed(3, "c@example.com")
+        h.make_live("a@example.com", 1)
+        return h
+
+    def test_higher_override_holds_active_below_its_own_limit(self, temp_home):
+        # a@example.com may run to 98% before switching; at 95% (over the
+        # global 90) it stays put — no switch fires.
+        h = self._harness(temp_home, per_account_threshold=(("a@example.com", 98.0),))
+        outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10), "3": _usage(10)})
+        assert outcome is TickOutcome.NO_ACTION
+        assert h.active_number() == 1
+        events = [e for e in h.events if isinstance(e, NoSwitchEvent)]
+        assert [e.reason for e in events] == ["below-threshold"]
+        assert events[0].detail == "95% < 98%"  # the override, not the global 90
+
+    def test_override_for_another_account_uses_global_threshold(self, temp_home):
+        # The override targets b@example.com, so the active a@example.com falls
+        # back to the global 90 and switches away at 95%.
+        h = self._harness(temp_home, per_account_threshold=(("b@example.com", 98.0),))
+        outcome = h.tick_with_usage({"1": _usage(95), "2": _usage(10), "3": _usage(10)})
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() != 1
+
+    def test_lower_override_switches_earlier(self, temp_home):
+        # a@example.com is capped at 80: at 85% (under the global 90) it still
+        # switches away to a fresher account.
+        h = self._harness(temp_home, per_account_threshold=(("a@example.com", 80.0),))
+        outcome = h.tick_with_usage({"1": _usage(85), "2": _usage(10), "3": _usage(10)})
+        assert outcome is TickOutcome.SWITCHED
+        assert h.active_number() != 1
+
+
 class TestIdleHold:
     """Active token expired while Claude Code owns it → hold, don't fail over."""
 

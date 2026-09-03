@@ -977,7 +977,16 @@ class AutoSwitchEngine:
             self._unhealthy_ticks = 0
             self._idle_hold_since = None
             utilization = 100.0 - active_headroom
-            if utilization < settings.threshold:
+            # Per-account override: a specific account can be leaned on up to its
+            # own limit before switching away (issue: auto-swap limit for
+            # continued usage on a secondary account). Only the "stay vs. move"
+            # decision consults it; the candidate-landing bar below stays global.
+            active_threshold = settings.threshold
+            if settings.per_account_threshold:
+                active_threshold = settings.threshold_for(
+                    self.switcher.account_email(current)
+                )
+            if utilization < active_threshold:
                 if settings.strategy != "consume-first":
                     self._emit(
                         NoSwitchEvent(
@@ -986,7 +995,7 @@ class AutoSwitchEngine:
                             # display an impossible "100% < 99.9%".
                             detail=(
                                 f"{pct_label(utilization)}% < "
-                                f"{pct_label(settings.threshold)}%"
+                                f"{pct_label(active_threshold)}%"
                             ),
                         )
                     )

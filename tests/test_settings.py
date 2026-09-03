@@ -17,12 +17,15 @@ from claude_swap.settings import (
     AutoSwitchSettings,
     UiSettings,
     effective_settings,
+    load_per_account_thresholds,
     load_settings,
     load_ui_settings,
     merged_with_cli,
     save_settings,
+    set_per_account_threshold,
     set_setting,
     settings_path,
+    unset_per_account_threshold,
     unset_setting,
 )
 
@@ -105,6 +108,13 @@ class TestSaveSettings:
         save_settings(tmp_path, custom)
         assert load_settings(tmp_path) == custom
 
+    def test_roundtrip_preserves_per_account_threshold(self, tmp_path: Path):
+        custom = AutoSwitchSettings(
+            threshold=85.0, per_account_threshold=(("a@x.com", 98.0), ("b@x.com", 80.0))
+        )
+        save_settings(tmp_path, custom)
+        assert load_settings(tmp_path) == custom
+
     def test_unknown_keys_survive(self, tmp_path: Path):
         settings_path(tmp_path).write_text(json.dumps({
             "schemaVersion": 1,
@@ -153,12 +163,19 @@ class TestUiSettings:
 
 
 class TestSettingSpecs:
+    # per_account_threshold is a map, not a scalar tunable, so it lives outside
+    # the SettingSpec registry (its own load/set/unset helpers) rather than
+    # being reachable through `cswap config set`.
+    _NON_SPEC_FIELDS = {"per_account_threshold"}
+
     def test_registry_covers_every_dataclass_field(self):
         by_section: dict[str, set[str]] = {}
         for spec in SETTING_SPECS.values():
             by_section.setdefault(spec.section, set()).add(spec.field)
         assert by_section["autoswitch"] == {
-            f.name for f in AutoSwitchSettings.__dataclass_fields__.values()
+            f.name
+            for f in AutoSwitchSettings.__dataclass_fields__.values()
+            if f.name not in self._NON_SPEC_FIELDS
         }
         assert by_section["ui"] == {
             f.name for f in UiSettings.__dataclass_fields__.values()
@@ -355,3 +372,57 @@ class TestAtomicWriteThroughSymlink:
         assert (repo.stat().st_mode & 0o777) == 0o755, "foreign dir untouched"
         assert (live.stat().st_mode & 0o777) == 0o700, "our dir hardened"
         assert (tracked.stat().st_mode & 0o777) == 0o600, "file still 0600"
+
+
+class TestPerAccountThreshold:
+    """Per-account switch-away thresholds (autoswitch.perAccountThreshold)."""
+
+    def test_missing_gives_empty(self, tmp_path: Path):
+        assert load_per_account_thresholds(tmp_path) == {}
+        assert load_settings(tmp_path).per_account_threshold == ()
+
+    def test_set_load_and_threshold_for(self, tmp_path: Path):
+        assert set_per_account_threshold(tmp_path, "a@x.com", 98) == 98.0
+        set_per_account_threshold(tmp_path, "b@x.com", 85)
+        assert load_per_account_thresholds(tmp_path) == {"a@x.com": 98.0, "b@x.com": 85.0}
+        settings = load_settings(tmp_path)
+        assert settings.threshold_for("a@x.com") == 98.0
+        assert settings.threshold_for("b@x.com") == 85.0
+        assert settings.threshold_for("c@x.com") == settings.threshold  # global fallback
+        assert settings.threshold_for(None) == settings.threshold
+
+    def test_set_is_range_checked(self, tmp_path: Path):
+        with pytest.raises(ConfigError):
+            set_per_account_threshold(tmp_path, "a@x.com", 40)  # below the 50 floor
+        with pytest.raises(ConfigError):
+            set_per_account_threshold(tmp_path, "", 90)  # empty email
+
+    def test_load_clamps_and_drops_bad_entries(self, tmp_path: Path):
+        settings_path(tmp_path).write_text(json.dumps({
+            "autoswitch": {"perAccountThreshold": {
+                "a@x.com": 200,      # clamped to 99.9
+                "b@x.com": "high",   # non-numeric → dropped
+                "": 90,              # empty email → dropped
+            }}
+        }))
+        assert load_per_account_thresholds(tmp_path) == {"a@x.com": 99.9}
+
+    def test_unset_removes_and_reports(self, tmp_path: Path):
+        set_per_account_threshold(tmp_path, "a@x.com", 98)
+        set_per_account_threshold(tmp_path, "b@x.com", 85)
+        assert unset_per_account_threshold(tmp_path, "a@x.com") is True
+        assert load_per_account_thresholds(tmp_path) == {"b@x.com": 85.0}
+        assert unset_per_account_threshold(tmp_path, "missing@x.com") is False
+
+    def test_unset_last_removes_the_key(self, tmp_path: Path):
+        set_per_account_threshold(tmp_path, "a@x.com", 98)
+        unset_per_account_threshold(tmp_path, "a@x.com")
+        raw = json.loads(settings_path(tmp_path).read_text())
+        assert "perAccountThreshold" not in raw.get("autoswitch", {})
+
+    def test_survives_a_scalar_config_set(self, tmp_path: Path):
+        # Writing an unrelated scalar key must not clobber the per-account map.
+        set_per_account_threshold(tmp_path, "a@x.com", 98)
+        set_setting(tmp_path, "autoswitch.threshold", "80")
+        assert load_per_account_thresholds(tmp_path) == {"a@x.com": 98.0}
+        assert load_settings(tmp_path).threshold == 80.0

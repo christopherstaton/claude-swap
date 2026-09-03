@@ -57,6 +57,25 @@ class AutoSwitchSettings:
     # 5h/7d windows still have headroom. None = account-wide 5h/7d only
     # (default).
     model: str | None = None
+    # Per-account override of ``threshold`` for the *active* account: keep using
+    # a given account up to its own limit before auto-switching away (e.g. lean
+    # on a secondary account to 98% while others switch at 90%). Stored as a
+    # sorted tuple of (email, threshold) pairs so this frozen dataclass stays
+    # hashable/immutable. Empty ⇒ every account uses the global ``threshold``.
+    # Only the active-account "should I move on" decision consults it; the
+    # candidate-landing bar stays on the global threshold.
+    per_account_threshold: tuple[tuple[str, float], ...] = ()
+
+    def threshold_for(self, email: str | None) -> float:
+        """Switch-away threshold for the active account ``email``.
+
+        Its per-account override when one is set, else the global ``threshold``.
+        """
+        if email:
+            for acc_email, value in self.per_account_threshold:
+                if acc_email == email:
+                    return value
+        return self.threshold
 
 
 @dataclass(frozen=True)
@@ -167,6 +186,26 @@ def parse_model_names(value: str | None) -> tuple[str, ...]:
     return tuple(seen.values())
 
 
+def _parse_per_account_thresholds(obj: object) -> tuple[tuple[str, float], ...]:
+    """Sanitize a raw ``perAccountThreshold`` map into sorted (email, pct) pairs.
+
+    Values are clamped to the same range as the global ``autoswitch.threshold``;
+    non-string keys, empty emails, and non-numeric values are dropped so a
+    hand-edited settings.json can't feed the engine a bogus per-account limit.
+    """
+    if not isinstance(obj, dict):
+        return ()
+    spec = SETTING_SPECS["autoswitch.threshold"]
+    out: list[tuple[str, float]] = []
+    for email, value in obj.items():
+        if not isinstance(email, str) or not email:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        out.append((email, float(min(max(value, spec.lo), spec.hi))))
+    return tuple(sorted(out))
+
+
 def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
     """Clamp values into the SETTING_SPECS ranges; bad types → the default."""
 
@@ -175,7 +214,7 @@ def _clamped(settings: AutoSwitchSettings) -> AutoSwitchSettings:
             return default
         return float(min(max(value, lo), hi))
 
-    kwargs = {}
+    kwargs = {"per_account_threshold": settings.per_account_threshold}
     for spec in SETTING_SPECS.values():
         if spec.section != "autoswitch":
             continue
@@ -224,10 +263,11 @@ def load_settings(backup_root: Path) -> AutoSwitchSettings:
     for field, json_key in _AUTOSWITCH_KEYS.items():
         if json_key in section:
             kwargs[field] = section[json_key]
+    per_account = _parse_per_account_thresholds(section.get("perAccountThreshold"))
     try:
-        settings = AutoSwitchSettings(**kwargs)
+        settings = AutoSwitchSettings(**kwargs, per_account_threshold=per_account)
     except TypeError:
-        settings = AutoSwitchSettings()
+        settings = AutoSwitchSettings(per_account_threshold=per_account)
     return _clamped(settings)
 
 
@@ -258,6 +298,10 @@ def save_settings(backup_root: Path, settings: AutoSwitchSettings) -> None:
         section = {}
     for field, json_key in _AUTOSWITCH_KEYS.items():
         section[json_key] = getattr(settings, field)
+    if settings.per_account_threshold:
+        section["perAccountThreshold"] = dict(settings.per_account_threshold)
+    else:
+        section.pop("perAccountThreshold", None)
     raw["autoswitch"] = section
     atomic_write_json(path, raw)
 
@@ -397,6 +441,59 @@ def unset_setting(backup_root: Path, dotted_key: str) -> bool:
     del section[spec.json_key]
     if not section:
         del raw[spec.section]
+    atomic_write_json(path, raw)
+    return True
+
+
+def load_per_account_thresholds(backup_root: Path) -> dict[str, float]:
+    """Per-account switch-away thresholds as ``{email: pct}`` (empty if none)."""
+    return dict(load_settings(backup_root).per_account_threshold)
+
+
+def set_per_account_threshold(backup_root: Path, email: str, value) -> float:
+    """Set one account's switch-away threshold, validated like the global one.
+
+    Reuses ``autoswitch.threshold``'s range check so a per-account limit can't
+    be set outside the same bounds; raises ConfigError on a bad value. Other
+    keys and sections in settings.json survive.
+    """
+    if not isinstance(email, str) or not email.strip():
+        raise ConfigError("per-account threshold requires a non-empty account email")
+    email = email.strip()
+    parsed = parse_setting_value(SETTING_SPECS["autoswitch.threshold"], str(value))
+    path = settings_path(backup_root)
+    raw = _read_raw_for_write(path)
+    raw["schemaVersion"] = raw.get("schemaVersion", SETTINGS_SCHEMA_VERSION)
+    section = raw.get("autoswitch")
+    if not isinstance(section, dict):
+        section = {}
+    per = section.get("perAccountThreshold")
+    if not isinstance(per, dict):
+        per = {}
+    per[email] = parsed
+    section["perAccountThreshold"] = per
+    raw["autoswitch"] = section
+    atomic_write_json(path, raw)
+    return parsed
+
+
+def unset_per_account_threshold(backup_root: Path, email: str) -> bool:
+    """Remove one account's threshold override; False (no write) if unset."""
+    path = settings_path(backup_root)
+    raw = _read_raw_for_write(path)
+    section = raw.get("autoswitch")
+    if not isinstance(section, dict):
+        return False
+    per = section.get("perAccountThreshold")
+    if not isinstance(per, dict) or email not in per:
+        return False
+    del per[email]
+    if per:
+        section["perAccountThreshold"] = per
+    else:
+        del section["perAccountThreshold"]
+    raw["schemaVersion"] = raw.get("schemaVersion", SETTINGS_SCHEMA_VERSION)
+    raw["autoswitch"] = section
     atomic_write_json(path, raw)
     return True
 
