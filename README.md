@@ -248,6 +248,8 @@ cswap menubar
 
 Shows every account's 5h / 7d / spend usage and switches with a click (specific / rotate / best / next-available), plus the TUI's add / disable-enable / remove / refresh actions. Enable *Settings → Auto-switch accounts* to run the same engine as [`cswap auto`](#automatic-switching) in the background; it shares the `autoswitch.*` settings, so the menu bar and CLI stay in sync. Off until you turn it on.
 
+Each account is a submenu: the row shows the profile, a battery-drain gauge, and the session (5h) percentage with its live reset countdown, and hovering reveals the detail — email, account number, per-window resets, the session window's start/reset schedule, per-model limits, and any overage. Per-account, that submenu also sets which percentages the title shows (*Show in menu-bar title*) and a custom auto-switch-away limit (*Auto-swap away at*) so a secondary account can be leaned on up to its own threshold before the engine moves off it. *Settings* adds a battery gauge to the title (*Battery gauge in title*) and hides the ⇄ glyph (*Show swap icon*).
+
 **Keep it running without a terminal.** `cswap menubar` runs in the foreground, so the status item dies with the terminal that started it and does not come back after a reboot. `--install-service` hands it to launchd instead — starts at login, restarts on crash, no `.app` bundle:
 
 ```bash
@@ -259,6 +261,23 @@ cswap menubar --uninstall-service   # stop it and remove the plist
 The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to `~/Library/Logs/com.cswap.menubar.{log,err}`. It pins the `cswap` console script, whose path survives an upgrade — but the running process keeps the old build until it restarts, so after `cswap upgrade` either re-run `--install-service` or `launchctl kickstart -k gui/$(id -u)/com.cswap.menubar`.
 
 </details>
+
+### Statusline (Claude Code)
+
+`cswap statusline` prints a [Claude Code statusline](https://code.claude.com/docs/en/statusline) showing the active swapped account and its 5h session usage — styled after the [Claude Usage Tracker](https://github.com/hamed-elfayome/Claude-Usage-Tracker) app:
+
+```
+my-project │ ⎇ main │ Opus │ work │ Ctx: 48% │ Usage: 47% ▓▓▓▓┃░░░░░ → Reset: 4:15 PM
+```
+
+The `Usage` bar is the active account's 5h utilization with a `┃` pace marker at the elapsed point of the window, and `work` is the active profile (its alias or email) — so the prompt tells you which account is live and how close it is to its session limit. Usage is read from the local store (no network), so it's cheap to run on every render.
+
+```bash
+cswap statusline --install     # wire it into ~/.claude/settings.json
+cswap statusline --uninstall   # remove it
+```
+
+Flags: `--no-color` (also honors `NO_COLOR`), `--24h`, `--no-branch`.
 
 ## Advanced
 

@@ -960,6 +960,117 @@ def _menubar_service(args) -> int:
     return 0
 
 
+def _statusline_profile(switcher) -> tuple[str | None, dict | None]:
+    """The active account's display name and 5h window, read store-only.
+
+    Returns ``(profile, five_hour)`` — the alias or email local part and the
+    active account's five-hour usage window (``{"pct", "resets_at"}``), or
+    ``(None, None)`` when there's no managed active login. No network: the
+    statusline runs on every prompt render, so it must be cheap.
+    """
+    active = switcher.current_account_number()
+    if active is None:
+        return None, None
+    snap = switcher.accounts_snapshot(fetch=set())  # store-only, no fetch
+    for acc in snap.accounts:
+        if acc.number != active:
+            continue
+        profile = acc.alias or acc.email.split("@", 1)[0]
+        last_good = acc.usage.last_good
+        five = last_good.get("five_hour") if isinstance(last_good, dict) else None
+        return profile, five if isinstance(five, dict) else None
+    return None, None
+
+
+def _statusline_command(argv: list[str]) -> None:
+    """Handle `cswap statusline` — a Claude Code statusline showing the active
+    swapped account and its 5h session usage (see ``claude_swap.statusline``).
+
+    Reads Claude Code's JSON from stdin and prints one line; ``--install`` /
+    ``--uninstall`` wire it into ``~/.claude/settings.json``. Pre-dispatched
+    like `config`, so it must be the first argument.
+    """
+    import time
+
+    from claude_swap import statusline as sl
+
+    parser = argparse.ArgumentParser(
+        prog="cswap statusline",
+        description=(
+            "Print a Claude Code statusline showing the active swapped account "
+            "and its 5h session usage. Configure Claude Code to run it with "
+            "'cswap statusline --install'."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap statusline --install     # add it to ~/.claude/settings.json
+  cswap statusline --uninstall   # remove it
+  echo '{}' | cswap statusline   # preview the line
+        """,
+    )
+    parser.add_argument("--install", action="store_true",
+                        help="Add the statusline to ~/.claude/settings.json")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="Remove the statusline from ~/.claude/settings.json")
+    parser.add_argument("--no-color", action="store_true",
+                        help="Disable ANSI color (also honors the NO_COLOR env var)")
+    parser.add_argument("--24h", dest="use_24h", action="store_true",
+                        help="Show the reset time in 24-hour format")
+    parser.add_argument("--no-branch", action="store_true",
+                        help="Don't show the git branch (skips a git call per render)")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    if args.install or args.uninstall:
+        path = sl.default_settings_path()
+        if args.uninstall:
+            removed = sl.uninstall_statusline(path)
+            print(f"Removed statusline from {path}" if removed
+                  else f"No statusline configured in {path}")
+        else:
+            sl.install_statusline(path)
+            print(f"Installed statusline in {path}\nStart a new Claude Code "
+                  "session (or run /statusline) to see it.")
+        return
+
+    stdin_text = "" if sys.stdin.isatty() else sys.stdin.read()
+    inp = sl.parse_input(stdin_text)
+    color = not args.no_color and not os.environ.get("NO_COLOR")
+    branch = None if args.no_branch else sl.current_git_branch(inp.current_dir)
+
+    # Never let a statusline error break Claude Code's prompt: fall back to the
+    # stdin-only line (dir/branch/model/context) without account usage.
+    profile = None
+    util = None
+    reset_epoch = None
+    try:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        profile, five = _statusline_profile(switcher)
+        if isinstance(five, dict) and isinstance(five.get("pct"), (int, float)):
+            util = int(round(five["pct"]))
+            resets_at = five.get("resets_at")
+            if isinstance(resets_at, str):
+                try:
+                    from datetime import datetime
+                    reset_epoch = datetime.fromisoformat(resets_at).timestamp()
+                except ValueError:
+                    reset_epoch = None
+    except Exception:
+        pass  # best-effort; the stdin-derived segments still render
+
+    print(sl.render(
+        inp,
+        profile=profile,
+        branch=branch,
+        util=util,
+        reset_epoch=reset_epoch,
+        now=time.time(),
+        color=color,
+        use_24h=args.use_24h,
+    ))
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     force_utf8_output()
@@ -985,6 +1096,9 @@ def main() -> None:
         return  # only reachable in tests where sys.exit is mocked
     if len(sys.argv) > 1 and sys.argv[1] == "config":
         _config_command(sys.argv[2:])
+        return
+    if argv and argv[0] == "statusline":
+        _statusline_command(argv[1:])
         return
     if argv and argv[0] == "map":
         _map_command(argv[1:])
@@ -1044,6 +1158,7 @@ Commands:
   %(prog)s move <a> <slot>            assign an account to a slot (swaps if taken)
   %(prog)s auto                       auto-switch when nearing rate limits
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
+  %(prog)s statusline [--install]     Claude Code statusline (active account + usage)
   %(prog)s unclaimed [--purge ID]     list or drop stashed credential entries
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts
