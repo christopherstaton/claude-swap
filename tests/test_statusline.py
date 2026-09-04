@@ -1,139 +1,183 @@
-"""Tests for the Claude Code statusline (``cswap statusline``).
+"""Tests for the native Claude Code statusline (``cswap statusline``).
 
-Pure rendering/parsing helpers only — no switcher, no network. The reset-time
-tests build epochs from naive *local* datetimes so ``.timestamp()`` and
-``fromtimestamp`` round-trip in whatever timezone CI runs in.
+Pure parsing/rendering/banding helpers plus the per-session state files — no
+switcher, no network. State-file tests run against ``tmp_path``.
 """
 
 from __future__ import annotations
 
-import datetime as dt
 import json
+import os
 from pathlib import Path
 
 from claude_swap import statusline as sl
 
 
-# --- stdin parsing -------------------------------------------------------------
+# --- native payload parsing ----------------------------------------------------
+
+_PAYLOAD = {
+    "session_id": "abc123",
+    "model": {"id": "claude-opus", "display_name": "Opus"},
+    "workspace": {"current_dir": "/Users/me/luet-apps", "project_dir": "/Users/me/luet-apps"},
+    "context_window": {"context_window_size": 200000, "used_percentage": 42},
+    "effort": {"level": "high"},
+    "fast_mode": True,
+    "rate_limits": {
+        "five_hour": {"used_percentage": 46.0, "resets_at": 1738425600},
+        "seven_day": {"used_percentage": 12.0, "resets_at": 1738857600},
+    },
+}
+
 
 def test_parse_input_full():
-    stdin = json.dumps({
-        "model": {"display_name": "Opus"},
-        "workspace": {"current_dir": "/Users/me/my-project"},
-        "input_tokens": 1000,
-        "cache_read_input_tokens": 95000,
-        "context_window_size": 200000,
-    })
-    inp = sl.parse_input(stdin)
-    assert inp.current_dir == "/Users/me/my-project"
+    inp = sl.parse_input(json.dumps(_PAYLOAD))
+    assert inp.session_id == "abc123"
     assert inp.model == "Opus"
-    assert inp.context_pct == 48  # (1000 + 95000) / 200000
+    assert inp.current_dir == "/Users/me/luet-apps"
+    assert inp.context_pct == 42.0
+    assert inp.effort == "high"
+    assert inp.fast_mode is True
+    assert inp.five_hour_used == 46.0
+    assert inp.five_hour_resets_at == 1738425600.0
+    assert inp.seven_day_used == 12.0
+
+
+def test_parse_input_falls_back_to_cwd():
+    inp = sl.parse_input(json.dumps({"cwd": "/tmp/x", "model": {"display_name": "Sonnet"}}))
+    assert inp.current_dir == "/tmp/x"
+
+
+def test_parse_input_absent_rate_limits_and_effort():
+    # rate_limits only appears for Pro/Max after the first API response; effort
+    # is absent on unsupported models. Both just drop their fields.
+    inp = sl.parse_input(json.dumps({"model": {"display_name": "Haiku"}}))
+    assert inp.five_hour_used is None
+    assert inp.effort is None
+    assert inp.context_pct is None
 
 
 def test_parse_input_empty_and_broken():
     assert sl.parse_input("") == sl.StatuslineInput()
     assert sl.parse_input("not json") == sl.StatuslineInput()
-    assert sl.parse_input("[1, 2, 3]") == sl.StatuslineInput()
+    assert sl.parse_input("[1,2]") == sl.StatuslineInput()
 
 
-def test_parse_input_context_dropped_without_window():
-    inp = sl.parse_input(json.dumps({"input_tokens": 500}))
-    assert inp.context_pct is None
+# --- color banding -------------------------------------------------------------
+
+def test_draining_usage_color_bands():
+    assert sl.draining_usage_color(80) == "a4343a"   # >70 brick
+    assert sl.draining_usage_color(60) == "3fb950"   # >50 green
+    assert sl.draining_usage_color(40) == "e8890c"   # >25 orange
+    assert sl.draining_usage_color(15) == "e0c020"   # >10 yellow
+    assert sl.draining_usage_color(5) == "d0322b"    # <=10 red
 
 
-# --- bar geometry --------------------------------------------------------------
-
-def test_filled_blocks_rounds_and_clamps():
-    assert sl._filled_blocks(0) == 0
-    assert sl._filled_blocks(100) == 10
-    assert sl._filled_blocks(47) == 5  # round(4.7)
-    assert sl._filled_blocks(4) == 0   # round(0.4)
-    assert sl._filled_blocks(5) == 1   # round-half-up
-    assert sl._filled_blocks(150) == 10
+def test_context_color_bands():
+    assert sl.context_color(40) == "3fb950"   # <=40 green
+    assert sl.context_color(60) == "e0c020"   # <=60 yellow
+    assert sl.context_color(80) == "e8890c"   # <=80 orange
+    assert sl.context_color(95) == "d0322b"   # >80 red
 
 
-def test_usage_bar_plain_no_marker_without_reset():
-    assert sl.usage_bar(0) == " ░░░░░░░░░░"
-    assert sl.usage_bar(100) == " ▓▓▓▓▓▓▓▓▓▓"
-    assert sl.usage_bar(50) == " ▓▓▓▓▓░░░░░"
-
-
-def test_usage_bar_pace_marker_at_elapsed_position():
-    now = 1_000_000.0
-    reset = now + 2 * 3600  # 3h elapsed of the 5h window → marker near cell 6
-    assert sl.usage_bar(47, reset, now) == " ▓▓▓▓▓░┃░░░"
-
-
-def test_usage_bar_no_marker_when_reset_outside_window():
-    now = 1_000_000.0
-    # reset more than 5h out (fresh window, clock not started) → no marker
-    assert "┃" not in sl.usage_bar(10, now + 6 * 3600, now)
-    # reset already passed → no marker
-    assert "┃" not in sl.usage_bar(10, now - 60, now)
-
-
-def test_pace_marker_pos_bounds():
-    assert sl._pace_marker_pos(0) == 0
-    assert sl._pace_marker_pos(sl.SESSION_WINDOW_S) == 9  # clamped to last cell
-
-
-# --- reset time ----------------------------------------------------------------
-
-def test_format_reset_12h_no_leading_zero():
-    epoch = dt.datetime(2026, 9, 1, 16, 15, 0).timestamp()
-    assert sl.format_reset(epoch) == "4:15 PM"
-
-
-def test_format_reset_24h():
-    epoch = dt.datetime(2026, 9, 1, 16, 15, 0).timestamp()
-    assert sl.format_reset(epoch, use_24h=True) == "16:15"
-
-
-def test_format_reset_rounds_to_nearest_minute():
-    up = dt.datetime(2026, 9, 1, 6, 59, 45).timestamp()
-    assert sl.format_reset(up, use_24h=True) == "07:00"
-    down = dt.datetime(2026, 9, 1, 6, 59, 20).timestamp()
-    assert sl.format_reset(down, use_24h=True) == "06:59"
-
-
-def test_format_reset_noon_and_midnight():
-    assert sl.format_reset(dt.datetime(2026, 9, 1, 0, 5).timestamp()) == "12:05 AM"
-    assert sl.format_reset(dt.datetime(2026, 9, 1, 12, 5).timestamp()) == "12:05 PM"
-
-
-# --- full line assembly --------------------------------------------------------
+# --- line assembly -------------------------------------------------------------
 
 def test_render_full_line_plain():
-    inp = sl.StatuslineInput(current_dir="/Users/me/my-project", model="Opus", context_pct=48)
-    now = 1_000_000.0
     line = sl.render(
-        inp, profile="work", branch="main", util=47,
-        reset_epoch=now + 2 * 3600, now=now, color=False, use_24h=True,
+        profile="uchicago", profile_hex="800000", remaining_pct=54,
+        model="Opus", effort="high", context_pct=42,
+        branch="main", repo="luet-apps", color=False,
     )
-    assert line.startswith("my-project │ ⎇ main │ Opus │ work │ Ctx: 48% │ Usage: 47% ▓▓▓▓▓░┃░░░ → Reset: ")
+    assert line == "UCHICAGO 54% │ Opus high 42% │ ⎇ main │ luet-apps"
+
+
+def test_render_uppercases_profile_and_floors_percents():
+    line = sl.render(profile="work", remaining_pct=54.9, context_pct=42.9,
+                     model="Opus", color=False)
+    assert line == "WORK 54% │ Opus 42%"
 
 
 def test_render_drops_missing_segments():
-    # Only usage present: no dangling separators, no leading │.
-    line = sl.render(sl.StatuslineInput(), util=10, color=False)
-    assert line == "Usage: 10% ▓░░░░░░░░░"
+    assert sl.render(model="Opus", context_pct=10, color=False) == "Opus 10%"
+    assert sl.render(profile="w", remaining_pct=90, color=False) == "W 90%"
+    assert sl.render(repo="proj", color=False) == "proj"
+    assert sl.render(color=False) == ""
 
 
-def test_render_empty_when_nothing_available():
-    assert sl.render(sl.StatuslineInput(), color=False) == ""
+def test_render_effort_optional():
+    assert sl.render(model="Opus", color=False) == "Opus"
+    assert sl.render(model="Opus", effort="max", color=False) == "Opus max"
 
 
-def test_render_color_emits_ansi_and_balances_resets():
-    inp = sl.StatuslineInput(current_dir="proj", model="Opus")
-    line = sl.render(inp, util=95, color=True)
-    assert "\033[38;5;" in line
-    # Every color opened is closed: equal count of SGR-set and reset codes.
-    assert line.count("\033[38;5;") == line.count("\033[0m")
+def test_render_color_truecolor_and_balanced_resets():
+    line = sl.render(profile="uchicago", profile_hex="800000", remaining_pct=54,
+                     model="Opus", context_pct=42, branch="main", repo="x", color=True)
+    assert "\033[38;2;128;0;0m" in line          # #800000 profile
+    assert line.count("\033[38;2;") == line.count("\033[0m")  # every color closed
+
+
+# --- switch-instant usage source ----------------------------------------------
+
+def test_usage_source_first_sight_uses_store():
+    source, state = sl.usage_source(None, "a@x.com", 1000.0)
+    assert source == "store"
+    assert state == {"account": "a@x.com", "switched_at": 1000.0, "updated_at": 1000.0}
+
+
+def test_usage_source_within_grace_after_switch():
+    source, state = sl.usage_source(
+        {"account": "a@x.com", "switched_at": 1000.0}, "b@x.com", 1005.0
+    )
+    assert source == "store"           # account changed → new grace window
+    assert state["switched_at"] == 1005.0
+
+
+def test_usage_source_reverts_to_payload_after_grace():
+    source, _ = sl.usage_source(
+        {"account": "a@x.com", "switched_at": 1000.0}, "a@x.com", 1100.0
+    )
+    assert source == "payload"         # same account, 100s > 60s grace
+
+
+def test_usage_source_still_in_grace_same_account():
+    source, _ = sl.usage_source(
+        {"account": "a@x.com", "switched_at": 1000.0}, "a@x.com", 1030.0
+    )
+    assert source == "store"           # 30s < 60s grace, no switch
+
+
+# --- per-session state files ---------------------------------------------------
+
+def test_session_state_path_sanitizes_and_defaults(tmp_path: Path):
+    assert sl.session_state_path(tmp_path, "abc-123").name == ".statusline-abc-123.json"
+    assert sl.session_state_path(tmp_path, None).name == ".statusline-default.json"
+    assert sl.session_state_path(tmp_path, "../evil/x").name == ".statusline-evilx.json"
+
+
+def test_session_state_round_trip_and_bad_read(tmp_path: Path):
+    path = tmp_path / ".statusline-s.json"
+    sl.write_session_state(path, {"account": "a@x.com", "switched_at": 1.0})
+    assert sl.read_session_state(path) == {"account": "a@x.com", "switched_at": 1.0}
+    assert sl.read_session_state(tmp_path / "missing.json") == {}
+    path.write_text("{ broken", encoding="utf-8")
+    assert sl.read_session_state(path) == {}
+
+
+def test_prune_session_states_removes_stale_only(tmp_path: Path):
+    fresh = tmp_path / ".statusline-fresh.json"
+    stale = tmp_path / ".statusline-stale.json"
+    fresh.write_text("{}", encoding="utf-8")
+    stale.write_text("{}", encoding="utf-8")
+    now = 2_000_000.0
+    os.utime(stale, (now - 200000, now - 200000))  # > 1 day old
+    os.utime(fresh, (now - 10, now - 10))
+    sl.prune_session_states(tmp_path, now)
+    assert fresh.exists()
+    assert not stale.exists()
 
 
 # --- settings.json install/uninstall -------------------------------------------
 
-def test_install_statusline_adds_and_preserves(tmp_path: Path):
+def test_install_sets_command_and_refresh(tmp_path: Path):
     path = tmp_path / ".claude" / "settings.json"
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps({"theme": "dark"}), encoding="utf-8")
@@ -142,22 +186,15 @@ def test_install_statusline_adds_and_preserves(tmp_path: Path):
 
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["theme"] == "dark"  # untouched
-    assert data["statusLine"] == {"type": "command", "command": "cswap statusline", "padding": 0}
-
-
-def test_install_statusline_creates_missing_file(tmp_path: Path):
-    path = tmp_path / ".claude" / "settings.json"
-    sl.install_statusline(path)
-    assert json.loads(path.read_text(encoding="utf-8"))["statusLine"]["command"] == "cswap statusline"
+    assert data["statusLine"] == {
+        "type": "command", "command": "cswap statusline", "refreshInterval": 30,
+    }
 
 
 def test_uninstall_statusline(tmp_path: Path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"statusLine": {"x": 1}, "theme": "dark"}), encoding="utf-8")
-
     assert sl.uninstall_statusline(path) is True
     data = json.loads(path.read_text(encoding="utf-8"))
-    assert "statusLine" not in data
-    assert data["theme"] == "dark"
-
-    assert sl.uninstall_statusline(path) is False  # already gone → no-op
+    assert "statusLine" not in data and data["theme"] == "dark"
+    assert sl.uninstall_statusline(path) is False

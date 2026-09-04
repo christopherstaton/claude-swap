@@ -15,6 +15,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -494,6 +495,78 @@ def unset_per_account_threshold(backup_root: Path, email: str) -> bool:
         del section["perAccountThreshold"]
     raw["schemaVersion"] = raw.get("schemaVersion", SETTINGS_SCHEMA_VERSION)
     raw["autoswitch"] = section
+    atomic_write_json(path, raw)
+    return True
+
+
+_HEX_RE = re.compile(r"^[0-9a-fA-F]{6}$")
+
+
+def _normalize_hex(value: str) -> str:
+    """Validate a 6-digit hex color (``#`` optional); raise ConfigError if bad."""
+    trimmed = value.strip().lstrip("#")
+    if not _HEX_RE.match(trimmed):
+        raise ConfigError(f"color must be a 6-digit hex like 800000, got '{value}'")
+    return trimmed.lower()
+
+
+def load_statusline_colors(backup_root: Path) -> dict[str, str]:
+    """Per-account statusline brand colors as ``{email: hex}`` (sanitized)."""
+    raw = _read_raw(settings_path(backup_root))
+    section = raw.get("statusline")
+    colors = section.get("accountColors") if isinstance(section, dict) else None
+    out: dict[str, str] = {}
+    if isinstance(colors, dict):
+        for email, value in colors.items():
+            if isinstance(email, str) and email and isinstance(value, str):
+                trimmed = value.strip().lstrip("#")
+                if _HEX_RE.match(trimmed):
+                    out[email] = trimmed.lower()
+    return out
+
+
+def set_statusline_color(backup_root: Path, email: str, value: str) -> str:
+    """Set one account's statusline brand color (6-digit hex); returns it."""
+    if not isinstance(email, str) or not email.strip():
+        raise ConfigError("statusline color requires a non-empty account email")
+    email = email.strip()
+    hex_value = _normalize_hex(str(value))
+    path = settings_path(backup_root)
+    raw = _read_raw_for_write(path)
+    raw["schemaVersion"] = raw.get("schemaVersion", SETTINGS_SCHEMA_VERSION)
+    section = raw.get("statusline")
+    if not isinstance(section, dict):
+        section = {}
+    colors = section.get("accountColors")
+    if not isinstance(colors, dict):
+        colors = {}
+    colors[email] = hex_value
+    section["accountColors"] = colors
+    raw["statusline"] = section
+    atomic_write_json(path, raw)
+    return hex_value
+
+
+def unset_statusline_color(backup_root: Path, email: str) -> bool:
+    """Remove one account's statusline color; False (no write) if unset."""
+    path = settings_path(backup_root)
+    raw = _read_raw_for_write(path)
+    section = raw.get("statusline")
+    if not isinstance(section, dict):
+        return False
+    colors = section.get("accountColors")
+    if not isinstance(colors, dict) or email not in colors:
+        return False
+    del colors[email]
+    if colors:
+        section["accountColors"] = colors
+    else:
+        section.pop("accountColors", None)
+    raw["schemaVersion"] = raw.get("schemaVersion", SETTINGS_SCHEMA_VERSION)
+    if section:
+        raw["statusline"] = section
+    else:
+        raw.pop("statusline", None)
     atomic_write_json(path, raw)
     return True
 

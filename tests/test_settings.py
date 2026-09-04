@@ -426,3 +426,51 @@ class TestPerAccountThreshold:
         set_setting(tmp_path, "autoswitch.threshold", "80")
         assert load_per_account_thresholds(tmp_path) == {"a@x.com": 98.0}
         assert load_settings(tmp_path).threshold == 80.0
+
+
+class TestStatuslineColors:
+    """Per-account statusline brand colors (statusline.accountColors)."""
+
+    def test_missing_gives_empty(self, tmp_path: Path):
+        from claude_swap.settings import load_statusline_colors
+        assert load_statusline_colors(tmp_path) == {}
+
+    def test_set_load_unset(self, tmp_path: Path):
+        from claude_swap.settings import (
+            load_statusline_colors,
+            set_statusline_color,
+            unset_statusline_color,
+        )
+        assert set_statusline_color(tmp_path, "a@x.com", "#800000") == "800000"
+        set_statusline_color(tmp_path, "b@x.com", "A4343A")
+        assert load_statusline_colors(tmp_path) == {"a@x.com": "800000", "b@x.com": "a4343a"}
+        assert unset_statusline_color(tmp_path, "a@x.com") is True
+        assert load_statusline_colors(tmp_path) == {"b@x.com": "a4343a"}
+        assert unset_statusline_color(tmp_path, "missing@x.com") is False
+
+    def test_set_rejects_bad_hex_and_empty_email(self, tmp_path: Path):
+        from claude_swap.settings import set_statusline_color
+        with pytest.raises(ConfigError):
+            set_statusline_color(tmp_path, "a@x.com", "nothex")
+        with pytest.raises(ConfigError):
+            set_statusline_color(tmp_path, "a@x.com", "80000")  # only 5 digits
+        with pytest.raises(ConfigError):
+            set_statusline_color(tmp_path, "", "800000")
+
+    def test_load_drops_bad_entries(self, tmp_path: Path):
+        settings_path(tmp_path).write_text(json.dumps({
+            "statusline": {"accountColors": {
+                "a@x.com": "800000",
+                "b@x.com": "zzzzzz",   # non-hex → dropped
+                "": "ffffff",          # empty email → dropped
+            }}
+        }))
+        from claude_swap.settings import load_statusline_colors
+        assert load_statusline_colors(tmp_path) == {"a@x.com": "800000"}
+
+    def test_unset_last_removes_section(self, tmp_path: Path):
+        from claude_swap.settings import set_statusline_color, unset_statusline_color
+        set_statusline_color(tmp_path, "a@x.com", "800000")
+        unset_statusline_color(tmp_path, "a@x.com")
+        raw = json.loads(settings_path(tmp_path).read_text())
+        assert "statusline" not in raw

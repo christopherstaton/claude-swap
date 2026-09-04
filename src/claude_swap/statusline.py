@@ -1,93 +1,121 @@
-"""A Claude Code statusline for ``cswap`` (``cswap statusline``).
+"""A native Claude Code statusline for ``cswap`` (``cswap statusline``).
 
-Renders the one-line status Claude Code shows under the prompt, styled after
-the *Claude Usage Tracker* menu-bar app's statusline
-(https://github.com/hamed-elfayome/Claude-Usage-Tracker):
+Renders the one-line status Claude Code shows under the prompt — active swapped
+account + draining 5h usage, model + effort + context, git branch, and repo:
 
-    my-project │ ⎇ main │ Opus │ work │ Ctx: 48% │ Usage: 47% ▓▓▓▓┃░░░░░ → Reset: 4:15 PM
+    UCHICAGO 54% │ Opus high 42% │ ⎇ main │ luet-apps
+    └ profile+usage ┘ └ model effort ctx% ┘ └ branch ┘ └ repo ┘
 
-Claude Code invokes the configured command once per prompt render and pipes it
-a small JSON blob on stdin (model, workspace dir, token counts). This module
-combines that with claude-swap's own view of the active account — the profile
-name and its live 5h session utilization/reset, read from the usage store with
-no network — so the statusline shows *which swapped account is active* and how
-close it is to its session limit.
+Claude Code pipes a JSON payload on stdin every render (schema:
+https://code.claude.com/docs/en/statusline.md). This reads its *native* live
+fields — ``rate_limits.five_hour.used_percentage``, ``context_window``,
+``effort.level``, ``model.display_name``, ``session_id`` — rather than
+recomputing anything, and blends in claude-swap's own view of the active
+account (profile name, brand color, and a switch-instant usage grace so the %
+matches a freshly-switched account before Claude's payload catches up).
 
-The rendering helpers below are pure and import-safe (no switcher, no I/O), so
-they unit-test without a live environment; the ``cswap statusline`` glue that
-reads the store and stdin lives in ``cli._statusline_command``.
+Everything here is pure and import-safe except the session-state file helpers
+(which take an explicit path, so they unit-test against ``tmp_path``). The
+``cswap statusline`` glue that reads the store and stdin lives in
+``cli._statusline_command``.
 """
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
-# The 5h session window's fixed span, used to place the pace marker along the
-# bar by elapsed time (matches the reference app's 18000s window).
-SESSION_WINDOW_S = 5 * 3600
-BAR_CELLS = 10
-BAR_FULL = "▓"
-BAR_EMPTY = "░"
-PACE_MARKER = "┃"
 SEP = " │ "
+BRANCH_GLYPH = "⎇"
 
-# ANSI 256-color codes lifted from the reference statusline so the colored
-# output reads the same. Usage gradient: dark green → deep red, one step per
-# 10% band. Pace tiers: comfortable → runaway.
-_USAGE_GRADIENT = (22, 28, 34, 100, 142, 178, 172, 166, 160, 124)
-_PACE_TIERS = ((50, 34), (75, 37), (90, 178), (100, 208), (120, 160))
-_PACE_RUNAWAY = 135
-_RESET = "\033[0m"
+# Usage source switches to the store for this many seconds after an account
+# change, because Claude's own ``rate_limits`` payload lags the switch (#125).
+SWITCH_GRACE_S = 60.0
+# Per-session state files older than this are pruned on each render.
+STATE_MAX_AGE_S = 86400.0
+
+# --- palette (24-bit truecolor hex) --------------------------------------------
+# Brand + banded colors from the vault statusline note. Draining usage is shown
+# as *remaining* quota (100 − used); context is shown as *used*.
+PROFILE_DEFAULT_HEX = "af00af"  # magenta — any account without a set brand color
+COL_MODEL = "c9d1d9"            # model + effort (neutral light)
+COL_BRANCH = "3fb950"           # git branch (green)
+COL_REPO = "58a6ff"             # repo / working dir (blue)
+COL_SEP = "6e7681"              # the │ separators (gray)
+
+_BRICK = "a4343a"
+_GREEN = "3fb950"
+_ORANGE = "e8890c"
+_YELLOW = "e0c020"
+_RED = "d0322b"
 
 
-def _c(code: int, text: str, *, color: bool) -> str:
-    """Wrap ``text`` in a 256-color ANSI escape, or return it plain."""
-    if not color:
+def _paint(hex_color: str | None, text: str, *, color: bool) -> str:
+    """Wrap ``text`` in a 24-bit ANSI color, or return it plain."""
+    if not color or not hex_color:
         return text
-    return f"\033[38;5;{code}m{text}{_RESET}"
+    r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+    return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
 
 
-def _find_first(obj, key: str):
-    """First value for ``key`` anywhere in a nested dict/list, else ``None``.
+def draining_usage_color(remaining_pct: float) -> str:
+    """Hex color for *remaining* 5h quota — greener with more left, red at the end."""
+    if remaining_pct > 70:
+        return _BRICK
+    if remaining_pct > 50:
+        return _GREEN
+    if remaining_pct > 25:
+        return _ORANGE
+    if remaining_pct > 10:
+        return _YELLOW
+    return _RED
 
-    Claude Code's statusline JSON has nested its token/context fields under
-    different parents across versions; a recursive lookup keeps the parser from
-    pinning to one shape.
-    """
-    if isinstance(obj, dict):
-        if key in obj:
-            return obj[key]
-        for value in obj.values():
-            found = _find_first(value, key)
-            if found is not None:
-                return found
-    elif isinstance(obj, list):
-        for item in obj:
-            found = _find_first(item, key)
-            if found is not None:
-                return found
-    return None
+
+def context_color(used_pct: float) -> str:
+    """Hex color for context-window *used* % — signals when /clear would help."""
+    if used_pct <= 40:
+        return _GREEN
+    if used_pct <= 60:
+        return _YELLOW
+    if used_pct <= 80:
+        return _ORANGE
+    return _RED
+
+
+def _dig(data, *keys):
+    """Nested lookup ``data[k1][k2]…``; ``None`` if any level is missing."""
+    cur = data
+    for key in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
 
 
 @dataclass(frozen=True)
 class StatuslineInput:
-    """The parts of Claude Code's stdin JSON the statusline uses."""
+    """The native Claude Code payload fields the statusline reads."""
 
     current_dir: str | None = None
     model: str | None = None
-    context_pct: int | None = None
+    session_id: str | None = None
+    context_pct: float | None = None
+    effort: str | None = None
+    fast_mode: bool = False
+    five_hour_used: float | None = None
+    five_hour_resets_at: float | None = None
+    seven_day_used: float | None = None
 
 
 def parse_input(stdin_text: str) -> StatuslineInput:
     """Parse Claude Code's statusline JSON; unknown/broken input → empty fields.
 
-    Context percentage is (input + cache-create + cache-read tokens) over the
-    context window size, matching the reference. Missing token or window fields
-    just drop the context segment rather than erroring.
+    Reads the documented native fields directly (no token recomputation). Every
+    field is optional — ``rate_limits`` only appears for Pro/Max after the first
+    API response, ``context_window.used_percentage`` can be null early, and
+    ``effort`` is absent on models without the parameter — so each missing piece
+    just drops its segment rather than erroring.
     """
     try:
         data = json.loads(stdin_text) if stdin_text.strip() else {}
@@ -96,147 +124,135 @@ def parse_input(stdin_text: str) -> StatuslineInput:
     if not isinstance(data, dict):
         return StatuslineInput()
 
-    current_dir = _find_first(data, "current_dir")
-    model = _find_first(data, "display_name")
+    def _num(value) -> float | None:
+        return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
-    context_pct = None
-    window = _find_first(data, "context_window_size")
-    if isinstance(window, (int, float)) and window > 0:
-        used = 0
-        for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
-            value = _find_first(data, key)
-            if isinstance(value, (int, float)):
-                used += int(value)
-        context_pct = int(used * 100 / window)
+    def _str(value) -> str | None:
+        return value if isinstance(value, str) and value else None
 
     return StatuslineInput(
-        current_dir=current_dir if isinstance(current_dir, str) else None,
-        model=model if isinstance(model, str) else None,
-        context_pct=context_pct,
+        current_dir=_str(_dig(data, "workspace", "current_dir")) or _str(data.get("cwd")),
+        model=_str(_dig(data, "model", "display_name")),
+        session_id=_str(data.get("session_id")),
+        context_pct=_num(_dig(data, "context_window", "used_percentage")),
+        effort=_str(_dig(data, "effort", "level")),
+        fast_mode=bool(data.get("fast_mode")),
+        five_hour_used=_num(_dig(data, "rate_limits", "five_hour", "used_percentage")),
+        five_hour_resets_at=_num(_dig(data, "rate_limits", "five_hour", "resets_at")),
+        seven_day_used=_num(_dig(data, "rate_limits", "seven_day", "used_percentage")),
     )
 
 
-def _filled_blocks(util: int) -> int:
-    """Cells to fill for a utilization percent (round-half-up, clamped)."""
-    if util <= 0:
-        return 0
-    if util >= 100:
-        return BAR_CELLS
-    return max(0, min(BAR_CELLS, (util * BAR_CELLS + 50) // 100))
-
-
-def _pace_marker_pos(elapsed_s: int) -> int:
-    """Bar cell (0..BAR_CELLS-1) for the elapsed fraction of the 5h window."""
-    pos = (elapsed_s * BAR_CELLS + SESSION_WINDOW_S // 2) // SESSION_WINDOW_S
-    return max(0, min(BAR_CELLS - 1, pos))
-
-
-def usage_bar(
-    util: int,
-    reset_epoch: float | None = None,
-    now: float | None = None,
-    *,
-    color: bool = False,
-    usage_code: int | None = None,
-) -> str:
-    """A 10-cell ``▓``/``░`` gauge with a ``┃`` pace marker at elapsed time.
-
-    The bar shows *consumed* usage (fills as you spend); the pace marker sits
-    where the 5h clock has advanced to, so a fill lagging the marker means
-    you're under pace and a fill past it means you're ahead. The marker only
-    appears when ``reset_epoch``/``now`` place the clock inside the window.
-
-    When ``color``, the marker gets its own pace color and then re-opens
-    ``usage_code`` for the rest of the bar; the caller wraps the whole usage
-    segment in ``usage_code``, so the marker's reset doesn't bleed.
-    """
-    filled = _filled_blocks(util)
-    bar = " " + BAR_FULL * filled + BAR_EMPTY * (BAR_CELLS - filled)  # leading space + 10 cells
-
-    if reset_epoch is not None and now is not None:
-        remaining = reset_epoch - now
-        if 0 < remaining < SESSION_WINDOW_S:
-            elapsed = int(SESSION_WINDOW_S - remaining)
-            idx = _pace_marker_pos(elapsed) + 1  # +1 for the leading space
-            if color:
-                marker = f"\033[38;5;{_pace_color(util, elapsed)}m{PACE_MARKER}{_RESET}"
-                if usage_code is not None:
-                    marker += f"\033[38;5;{usage_code}m"  # resume the bar's color
-            else:
-                marker = PACE_MARKER
-            bar = bar[:idx] + marker + bar[idx + 1:]
-    return bar
-
-
-def _usage_color(util: int) -> int:
-    """256-color code for a utilization percent (10% bands)."""
-    band = min(len(_USAGE_GRADIENT) - 1, max(0, (max(0, util) - 1) // 10))
-    return _USAGE_GRADIENT[band]
-
-
-def _pace_color(util: int, elapsed_s: int) -> int:
-    """256-color code for the pace marker, by projected end-of-window usage."""
-    if elapsed_s <= 0:
-        return _usage_color(util)
-    projected = util * SESSION_WINDOW_S / elapsed_s
-    for upper, code in _PACE_TIERS:
-        if projected < upper:
-            return code
-    return _PACE_RUNAWAY
-
-
-def format_reset(reset_epoch: float, use_24h: bool = False) -> str:
-    """Local reset clock, rounded to the nearest minute (12h default)."""
-    seconds_part = int(reset_epoch) % 60
-    rounded = int(reset_epoch) + (60 - seconds_part if seconds_part >= 30 else -seconds_part)
-    when = datetime.fromtimestamp(rounded)
-    if use_24h:
-        return when.strftime("%H:%M")
-    # 12-hour without a leading zero on the hour (matches the reference).
-    return f"{((when.hour - 1) % 12) + 1}:{when.minute:02d} {when.strftime('%p')}"
-
-
 def render(
-    inp: StatuslineInput,
     *,
     profile: str | None = None,
+    profile_hex: str | None = None,
+    remaining_pct: float | None = None,
+    model: str | None = None,
+    effort: str | None = None,
+    context_pct: float | None = None,
     branch: str | None = None,
-    util: int | None = None,
-    reset_epoch: float | None = None,
-    now: float | None = None,
+    repo: str | None = None,
     color: bool = True,
-    use_24h: bool = True,
 ) -> str:
-    """Assemble the statusline from parsed stdin + claude-swap's active account.
+    """Assemble the ``profile usage │ model effort ctx │ ⎇ branch │ repo`` line.
 
-    ``util``/``reset_epoch`` are the active account's 5h session utilization and
-    reset time (from the usage store); ``profile`` is its alias or email local
-    part. Any segment whose data is missing is dropped, and the separators
-    collapse so there's never a dangling ``│``.
+    Any segment whose data is missing is dropped, and the ``│`` separators
+    collapse so there's never a dangling divider. ``remaining_pct`` is the
+    *remaining* 5h quota (drains toward 0); ``context_pct`` is context *used*.
     """
-    segments: list[str] = []
-    if inp.current_dir:
-        segments.append(_c(33, os.path.basename(inp.current_dir.rstrip("/")) or inp.current_dir, color=color))
-    if branch:
-        segments.append(_c(34, f"⎇ {branch}", color=color))
-    if inp.model:
-        segments.append(_c(178, inp.model, color=color))
-    if profile:
-        segments.append(_c(170, profile, color=color))
-    if inp.context_pct is not None:
-        segments.append(_c(37, f"Ctx: {inp.context_pct}%", color=color))
-    if util is not None:
-        usage_code = _usage_color(util)
-        bar = usage_bar(util, reset_epoch, now, color=color, usage_code=usage_code)
-        usage_seg = f"Usage: {util}%{bar}"
-        if reset_epoch is not None:
-            usage_seg += f" → Reset: {format_reset(reset_epoch, use_24h)}"
-        if color:
-            usage_seg = f"\033[38;5;{usage_code}m{usage_seg}{_RESET}"
-        segments.append(usage_seg)
+    groups: list[str] = []
 
-    sep = _c(90, SEP, color=color) if color else SEP
-    return sep.join(segments)
+    # 1) profile + draining usage
+    tokens: list[str] = []
+    if profile:
+        tokens.append(_paint(profile_hex or PROFILE_DEFAULT_HEX, profile.upper(), color=color))
+    if remaining_pct is not None:
+        tokens.append(_paint(draining_usage_color(remaining_pct), f"{int(remaining_pct)}%", color=color))
+    if tokens:
+        groups.append(" ".join(tokens))
+
+    # 2) model + effort + context%
+    tokens = []
+    if model:
+        label = f"{model} {effort}" if effort else model
+        tokens.append(_paint(COL_MODEL, label, color=color))
+    if context_pct is not None:
+        tokens.append(_paint(context_color(context_pct), f"{int(context_pct)}%", color=color))
+    if tokens:
+        groups.append(" ".join(tokens))
+
+    # 3) branch, 4) repo
+    if branch:
+        groups.append(_paint(COL_BRANCH, f"{BRANCH_GLYPH} {branch}", color=color))
+    if repo:
+        groups.append(_paint(COL_REPO, repo, color=color))
+
+    sep = _paint(COL_SEP, SEP, color=color) if color else SEP
+    return sep.join(groups)
+
+
+# --- switch-instant usage source (per-session state) ---------------------------
+
+def usage_source(
+    prev_state: dict | None,
+    current_account: str | None,
+    now: float,
+    *,
+    grace_s: float = SWITCH_GRACE_S,
+) -> tuple[str, dict]:
+    """Decide whether to read usage from the store or Claude's payload.
+
+    For ``grace_s`` after the active account changes (or on first sight), prefer
+    the store — it reflects the new account immediately, while Claude's
+    ``rate_limits`` payload still shows the old account for ~30s. Returns
+    ``("store"|"payload", new_state)``; the caller persists ``new_state``.
+    """
+    prev_account = prev_state.get("account") if isinstance(prev_state, dict) else None
+    switched_at = prev_state.get("switched_at") if isinstance(prev_state, dict) else None
+    if not isinstance(switched_at, (int, float)) or prev_account != current_account:
+        switched_at = now
+    new_state = {"account": current_account, "switched_at": switched_at, "updated_at": now}
+    in_grace = (now - switched_at) < grace_s
+    return ("store" if in_grace else "payload"), new_state
+
+
+def session_state_path(state_dir: Path, session_id: str | None) -> Path:
+    """Per-session state file (falls back to a shared file when no session id)."""
+    safe = "".join(c for c in (session_id or "default") if c.isalnum() or c in "-_") or "default"
+    return state_dir / f".statusline-{safe}.json"
+
+
+def read_session_state(path: Path) -> dict:
+    """Read a per-session state file; ``{}`` on any problem."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_session_state(path: Path, data: dict) -> None:
+    """Write a per-session state file, best-effort (never raises)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def prune_session_states(state_dir: Path, now: float, max_age_s: float = STATE_MAX_AGE_S) -> None:
+    """Delete stale ``.statusline-*.json`` state files (best-effort)."""
+    try:
+        entries = list(state_dir.glob(".statusline-*.json"))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if now - entry.stat().st_mtime > max_age_s:
+                entry.unlink()
+        except OSError:
+            pass
 
 
 def current_git_branch(cwd: str | None = None) -> str | None:
@@ -266,7 +282,6 @@ def default_settings_path() -> Path:
 
 
 def _read_settings(path: Path) -> dict:
-    """Read a Claude Code settings.json, tolerating a missing/broken file."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -279,10 +294,14 @@ def _write_settings(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def install_statusline(path: Path, command: str = "cswap statusline") -> None:
-    """Point Claude Code's ``statusLine`` at ``command``, preserving other keys."""
+def install_statusline(path: Path, command: str = "cswap statusline", refresh_interval: int = 30) -> None:
+    """Point Claude Code's ``statusLine`` at ``command``, preserving other keys.
+
+    ``refreshInterval`` re-runs the line every N seconds even while idle, so a
+    freshly-switched account or a passing rate-limit reset shows up promptly.
+    """
     data = _read_settings(path)
-    data["statusLine"] = {"type": "command", "command": command, "padding": 0}
+    data["statusLine"] = {"type": "command", "command": command, "refreshInterval": refresh_interval}
     _write_settings(path, data)
 
 

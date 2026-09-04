@@ -960,17 +960,26 @@ def _menubar_service(args) -> int:
     return 0
 
 
-def _statusline_profile(switcher) -> tuple[str | None, dict | None]:
-    """The active account's display name and 5h window, read store-only.
+def _resolve_or_exit(switcher, identifier: str) -> tuple[str, str, str]:
+    """Resolve NUM|EMAIL to (num, email, org_uuid), or print + exit(1) on error."""
+    try:
+        return switcher.resolve_account(identifier)
+    except ClaudeSwitchError as e:
+        error(f"Error: {e}")
+        sys.exit(1)
 
-    Returns ``(profile, five_hour)`` — the alias or email local part and the
-    active account's five-hour usage window (``{"pct", "resets_at"}``), or
-    ``(None, None)`` when there's no managed active login. No network: the
-    statusline runs on every prompt render, so it must be cheap.
+
+def _statusline_active(switcher) -> tuple[str | None, str | None, float | None]:
+    """Active account for the statusline, read store-only (no network).
+
+    Returns ``(profile, email, store_remaining_pct)`` — the alias or email
+    local part, the account email (a stable id for switch detection / brand
+    color), and 100 − the store's 5h used% (for the switch-instant grace).
+    ``(None, None, None)`` when there's no managed active login.
     """
     active = switcher.current_account_number()
     if active is None:
-        return None, None
+        return None, None, None
     snap = switcher.accounts_snapshot(fetch=set())  # store-only, no fetch
     for acc in snap.accounts:
         if acc.number != active:
@@ -978,45 +987,57 @@ def _statusline_profile(switcher) -> tuple[str | None, dict | None]:
         profile = acc.alias or acc.email.split("@", 1)[0]
         last_good = acc.usage.last_good
         five = last_good.get("five_hour") if isinstance(last_good, dict) else None
-        return profile, five if isinstance(five, dict) else None
-    return None, None
+        store_remaining = None
+        if isinstance(five, dict) and isinstance(five.get("pct"), (int, float)):
+            store_remaining = 100.0 - float(five["pct"])
+        return profile, acc.email, store_remaining
+    return None, None, None
 
 
 def _statusline_command(argv: list[str]) -> None:
-    """Handle `cswap statusline` — a Claude Code statusline showing the active
-    swapped account and its 5h session usage (see ``claude_swap.statusline``).
+    """Handle `cswap statusline` — a native Claude Code statusline.
 
-    Reads Claude Code's JSON from stdin and prints one line; ``--install`` /
-    ``--uninstall`` wire it into ``~/.claude/settings.json``. Pre-dispatched
-    like `config`, so it must be the first argument.
+    Shows the active swapped account + draining 5h usage, model + effort +
+    context, git branch, and repo, reading Claude's live payload fields. Reads
+    the JSON from stdin and prints one line; ``--install`` / ``--uninstall``
+    wire it into ``~/.claude/settings.json`` and ``--set-color`` /
+    ``--unset-color`` set per-account brand colors. Pre-dispatched like
+    `config`, so it must be the first argument.
     """
     import time
 
     from claude_swap import statusline as sl
+    from claude_swap.settings import (
+        load_statusline_colors,
+        set_statusline_color,
+        unset_statusline_color,
+    )
 
     parser = argparse.ArgumentParser(
         prog="cswap statusline",
         description=(
-            "Print a Claude Code statusline showing the active swapped account "
-            "and its 5h session usage. Configure Claude Code to run it with "
-            "'cswap statusline --install'."
+            "Print a native Claude Code statusline: active swapped account + "
+            "draining 5h usage, model/effort/context, branch, and repo."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  cswap statusline --install     # add it to ~/.claude/settings.json
-  cswap statusline --uninstall   # remove it
-  echo '{}' | cswap statusline   # preview the line
+  cswap statusline --install                  # add it to ~/.claude/settings.json
+  cswap statusline --uninstall                # remove it
+  cswap statusline --set-color 1 800000       # UChicago maroon for account 1
+  echo '{}' | cswap statusline                # preview the line
         """,
     )
     parser.add_argument("--install", action="store_true",
-                        help="Add the statusline to ~/.claude/settings.json")
+                        help="Add the statusline to ~/.claude/settings.json (30s refresh)")
     parser.add_argument("--uninstall", action="store_true",
                         help="Remove the statusline from ~/.claude/settings.json")
+    parser.add_argument("--set-color", nargs=2, metavar=("NUM|EMAIL", "HEX"),
+                        help="Set an account's profile brand color (6-digit hex)")
+    parser.add_argument("--unset-color", metavar="NUM|EMAIL",
+                        help="Clear an account's profile brand color")
     parser.add_argument("--no-color", action="store_true",
                         help="Disable ANSI color (also honors the NO_COLOR env var)")
-    parser.add_argument("--24h", dest="use_24h", action="store_true",
-                        help="Show the reset time in 24-hour format")
     parser.add_argument("--no-branch", action="store_true",
                         help="Don't show the git branch (skips a git call per render)")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -1034,41 +1055,218 @@ Examples:
                   "session (or run /statusline) to see it.")
         return
 
+    if args.set_color or args.unset_color:
+        switcher = ClaudeAccountSwitcher(debug=args.debug)
+        if args.set_color:
+            ident, hex_value = args.set_color
+            _, email, _ = _resolve_or_exit(switcher, ident)
+            try:
+                saved = set_statusline_color(switcher.backup_dir, email, hex_value)
+            except ClaudeSwitchError as e:
+                error(f"Error: {e}")
+                sys.exit(1)
+            print(f"Statusline color for {email} set to #{saved}")
+        else:
+            _, email, _ = _resolve_or_exit(switcher, args.unset_color)
+            cleared = unset_statusline_color(switcher.backup_dir, email)
+            print(f"Cleared statusline color for {email}" if cleared
+                  else f"No statusline color set for {email}")
+        return
+
     stdin_text = "" if sys.stdin.isatty() else sys.stdin.read()
     inp = sl.parse_input(stdin_text)
     color = not args.no_color and not os.environ.get("NO_COLOR")
     branch = None if args.no_branch else sl.current_git_branch(inp.current_dir)
+    repo = os.path.basename(inp.current_dir.rstrip("/")) if inp.current_dir else None
 
-    # Never let a statusline error break Claude Code's prompt: fall back to the
-    # stdin-only line (dir/branch/model/context) without account usage.
+    # Never let a statusline error break Claude Code's prompt: the stdin-derived
+    # segments (model/effort/context/branch/repo) still render on any failure.
     profile = None
-    util = None
-    reset_epoch = None
+    profile_hex = None
+    store_remaining = None
+    source = "payload"
     try:
         switcher = ClaudeAccountSwitcher(debug=args.debug)
-        profile, five = _statusline_profile(switcher)
-        if isinstance(five, dict) and isinstance(five.get("pct"), (int, float)):
-            util = int(round(five["pct"]))
-            resets_at = five.get("resets_at")
-            if isinstance(resets_at, str):
-                try:
-                    from datetime import datetime
-                    reset_epoch = datetime.fromisoformat(resets_at).timestamp()
-                except ValueError:
-                    reset_epoch = None
+        profile, email, store_remaining = _statusline_active(switcher)
+        if email:
+            profile_hex = load_statusline_colors(switcher.backup_dir).get(email)
+        # Switch-instant grace: prefer the store for 60s after an account change,
+        # keyed on the payload session_id so windows never clobber each other.
+        state_dir = switcher.backup_dir / "cache"
+        spath = sl.session_state_path(state_dir, inp.session_id)
+        now = time.time()
+        source, new_state = sl.usage_source(sl.read_session_state(spath), email, now)
+        sl.write_session_state(spath, new_state)
+        sl.prune_session_states(state_dir, now)
     except Exception:
-        pass  # best-effort; the stdin-derived segments still render
+        pass
+
+    payload_remaining = 100.0 - inp.five_hour_used if inp.five_hour_used is not None else None
+    if source == "store" and store_remaining is not None:
+        remaining = store_remaining
+    elif payload_remaining is not None:
+        remaining = payload_remaining
+    else:
+        remaining = store_remaining
 
     print(sl.render(
-        inp,
         profile=profile,
+        profile_hex=profile_hex,
+        remaining_pct=remaining,
+        model=inp.model,
+        effort=inp.effort,
+        context_pct=inp.context_pct,
         branch=branch,
-        util=util,
-        reset_epoch=reset_epoch,
-        now=time.time(),
+        repo=repo,
         color=color,
-        use_24h=args.use_24h,
     ))
+
+
+def _usage_command(argv: list[str]) -> None:
+    """Handle `cswap usage [NUM|EMAIL] [--json]` — current usage, for budgeting.
+
+    Exposes an account's current token usage (the active one by default) so a
+    Claude Code session can read it and budget tasks against a specific profile.
+    Reads the shared usage store (paced; may fetch if due), the same source as
+    `cswap list`. Pre-dispatched, so it must be the first argument.
+    """
+    from claude_swap.json_output import usage_fields
+
+    parser = argparse.ArgumentParser(
+        prog="cswap usage",
+        description="Show an account's current token usage (active account by default).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap usage                    # active account, human-readable
+  cswap usage work@example.com   # a specific profile
+  cswap usage 2 --json           # machine-readable, for scripting/budgeting
+        """,
+    )
+    parser.add_argument("account", nargs="?", metavar="NUM|EMAIL",
+                        help="Account to report (default: the active account)")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    switcher = ClaudeAccountSwitcher(debug=args.debug)
+    snap = switcher.accounts_snapshot()  # paced read (may fetch if due)
+    if args.account:
+        num, _, _ = _resolve_or_exit(switcher, args.account)
+        target = next((a for a in snap.accounts if a.number == num), None)
+    else:
+        target = next((a for a in snap.accounts if a.is_active), None)
+
+    if target is None:
+        msg = (f"Account not found: {args.account}" if args.account
+               else "No active account. Switch to one first, or pass NUM|EMAIL.")
+        if args.json:
+            print(json.dumps({"error": msg}))
+        else:
+            error(msg)
+        sys.exit(1)
+
+    entry = target.usage
+    collected = entry.sentinel if entry.sentinel else entry.last_good
+    status, usage = usage_fields(collected, entry.fetched_at)
+
+    if args.json:
+        print(json.dumps({
+            "account": {"number": int(target.number), "email": target.email,
+                        "alias": target.alias or None},
+            "usageStatus": status,
+            "usage": usage,
+            "ageSeconds": round(entry.age_s, 1) if entry.age_s is not None else None,
+        }, indent=2))
+        return
+
+    label = f"{target.alias} ({target.email})" if target.alias else target.email
+    print(f"{label}  [{status}]")
+    if not isinstance(collected, dict):
+        return
+    for key, name in (("five_hour", "5h session"), ("seven_day", "7d weekly")):
+        window = collected.get(key)
+        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
+            used = float(window["pct"])
+            extra = f" (resets {window['clock']})" if window.get("clock") else ""
+            print(f"  {name}: {used:.0f}% used · {100 - used:.0f}% left{extra}")
+    for window in collected.get("scoped") or []:
+        if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
+            print(f"  {window['name']}: {window['pct']:.0f}% used")
+    spend = collected.get("spend")
+    if isinstance(spend, dict) and isinstance(spend.get("pct"), (int, float)):
+        print(f"  spend: {spend['pct']:.0f}%")
+
+
+def _threshold_command(argv: list[str]) -> None:
+    """Handle `cswap threshold [NUM|EMAIL [PCT]] [--unset]` — per-account caps.
+
+    Sets per-account auto-switch-away thresholds (autoswitch.perAccountThreshold)
+    from the CLI, so a cron can pace one account: cap it at 80% for the first
+    hour (`cswap threshold work 80`), then `cswap threshold work --unset` to let
+    it run to the global limit. No argument lists the current overrides.
+    Pre-dispatched, so it must be the first argument.
+    """
+    from claude_swap.settings import (
+        load_per_account_thresholds,
+        load_settings,
+        set_per_account_threshold,
+        unset_per_account_threshold,
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="cswap threshold",
+        description="Show or set per-account auto-switch-away thresholds.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap threshold                 # list global + per-account thresholds
+  cswap threshold work 80         # cap account 'work' — auto-swap away at 80%
+  cswap threshold work --unset    # back to the global threshold
+        """,
+    )
+    parser.add_argument("account", nargs="?", metavar="NUM|EMAIL")
+    parser.add_argument("value", nargs="?", metavar="PCT", type=float,
+                        help="Auto-swap away when this account reaches this usage %%")
+    parser.add_argument("--unset", action="store_true",
+                        help="Remove this account's override (revert to the global threshold)")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    switcher = ClaudeAccountSwitcher(debug=args.debug)
+    backup = switcher.backup_dir
+
+    if not args.account:
+        thresholds = load_per_account_thresholds(backup)
+        global_t = float(load_settings(backup).threshold)
+        if args.json:
+            print(json.dumps({"global": global_t, "perAccount": thresholds}, indent=2))
+            return
+        print(f"Global auto-switch threshold: {global_t:g}%")
+        if thresholds:
+            for email, pct in sorted(thresholds.items()):
+                print(f"  {email}: {pct:g}%")
+        else:
+            print("  (no per-account overrides)")
+        return
+
+    _, email, _ = _resolve_or_exit(switcher, args.account)
+    if args.unset:
+        removed = unset_per_account_threshold(backup, email)
+        print(f"Cleared per-account threshold for {email}" if removed
+              else f"No per-account threshold set for {email}")
+        return
+    if args.value is None:
+        print(f"{email}: {float(load_settings(backup).threshold_for(email)):g}%")
+        return
+    try:
+        saved = set_per_account_threshold(backup, email, args.value)
+    except ClaudeSwitchError as e:
+        error(str(e))
+        sys.exit(1)
+    print(f"Per-account threshold for {email} set to {saved:g}% "
+          "(auto-swap away at this usage)")
 
 
 def main() -> None:
@@ -1099,6 +1297,12 @@ def main() -> None:
         return
     if argv and argv[0] == "statusline":
         _statusline_command(argv[1:])
+        return
+    if argv and argv[0] == "usage":
+        _usage_command(argv[1:])
+        return
+    if argv and argv[0] == "threshold":
+        _threshold_command(argv[1:])
         return
     if argv and argv[0] == "map":
         _map_command(argv[1:])
@@ -1159,6 +1363,8 @@ Commands:
   %(prog)s auto                       auto-switch when nearing rate limits
   %(prog)s config [set KEY VALUE]     show or change settings (settings.json)
   %(prog)s statusline [--install]     Claude Code statusline (active account + usage)
+  %(prog)s usage [num|email]          show an account's current token usage
+  %(prog)s threshold [num|email pct]  show/set per-account auto-swap-away caps
   %(prog)s unclaimed [--purge ID]     list or drop stashed credential entries
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts

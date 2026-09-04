@@ -264,20 +264,41 @@ The agent lives at `~/Library/LaunchAgents/com.cswap.menubar.plist` and logs to 
 
 ### Statusline (Claude Code)
 
-`cswap statusline` prints a [Claude Code statusline](https://code.claude.com/docs/en/statusline) showing the active swapped account and its 5h session usage — styled after the [Claude Usage Tracker](https://github.com/hamed-elfayome/Claude-Usage-Tracker) app:
+`cswap statusline` prints a native [Claude Code statusline](https://code.claude.com/docs/en/statusline) showing the active swapped account with its **draining** 5h usage, the model + reasoning effort + context, git branch, and repo:
 
 ```
-my-project │ ⎇ main │ Opus │ work │ Ctx: 48% │ Usage: 47% ▓▓▓▓┃░░░░░ → Reset: 4:15 PM
+UCHICAGO 54% │ Opus high 42% │ ⎇ main │ luet-apps
+└ profile+usage ┘ └ model effort ctx% ┘ └ branch ┘ └ repo ┘
 ```
 
-The `Usage` bar is the active account's 5h utilization with a `┃` pace marker at the elapsed point of the window, and `work` is the active profile (its alias or email) — so the prompt tells you which account is live and how close it is to its session limit. Usage is read from the local store (no network), so it's cheap to run on every render.
+It reads Claude's own live payload fields — `rate_limits.five_hour.used_percentage`, `context_window.used_percentage`, `effort.level` — so there's nothing to fetch. The usage is shown as **remaining** quota and color-bands as it drains (green → yellow → red); context% bands to signal when `/clear` would help. On an account switch it sources usage from cswap's store for a 60s grace window (keyed per session on `session_id`) so the % matches the new profile instantly, before Claude's payload catches up.
 
 ```bash
-cswap statusline --install     # wire it into ~/.claude/settings.json
-cswap statusline --uninstall   # remove it
+cswap statusline --install                # wire it in (~/.claude/settings.json, 30s refresh)
+cswap statusline --uninstall              # remove it
+cswap statusline --set-color 1 800000     # per-account brand color (UChicago maroon)
 ```
 
-Flags: `--no-color` (also honors `NO_COLOR`), `--24h`, `--no-branch`.
+Flags: `--no-color` (also honors `NO_COLOR`), `--no-branch`.
+
+### Budget by usage (`cswap usage`, `cswap threshold`)
+
+`cswap usage [num|email] [--json]` reports an account's current token usage (active account by default) so a Claude Code session — or a script — can **budget tasks** against a specific profile:
+
+```bash
+cswap usage --json          # active account, machine-readable
+cswap usage work            # a specific profile, human-readable
+```
+
+`cswap threshold [num|email pct]` sets a per-account **auto-swap-away cap** from the CLI, so a cron can pace one account instead of budgeting task-by-task — cap it at 80% for the first hour, then release it:
+
+```bash
+cswap threshold work 80     # auto-swap away from 'work' at 80% (keeps ~20% in reserve)
+cswap threshold work --unset  # later: let it run to the global threshold
+cswap threshold             # list the global + per-account thresholds
+```
+
+Both `cswap auto` and the menu-bar engine honor these caps.
 
 ## Advanced
 
