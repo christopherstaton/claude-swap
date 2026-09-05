@@ -83,22 +83,25 @@ def test_context_color_bands():
 
 def test_render_full_line_plain():
     line = sl.render(
-        profile="uchicago", profile_hex="800000", remaining_pct=54,
+        profile="UCHICAGO", profile_hex="800000", remaining_pct=54,
         model="Opus", effort="high", context_pct=42,
         branch="main", repo="luet-apps", color=False,
     )
     assert line == "UCHICAGO 54% │ Opus high 42% │ ⎇ main │ luet-apps"
 
 
-def test_render_uppercases_profile_and_floors_percents():
+def test_render_profile_verbatim_and_floors_percents():
+    # The profile is shown exactly as given — no forced case (the caller lowercases
+    # the email-prefix fallback and leaves an alias as typed); percents are floored.
     line = sl.render(profile="work", remaining_pct=54.9, context_pct=42.9,
                      model="Opus", color=False)
-    assert line == "WORK 54% │ Opus 42%"
+    assert line == "work 54% │ Opus 42%"
+    assert sl.render(profile="chris.k.staton", model="Opus", color=False) == "chris.k.staton │ Opus"
 
 
 def test_render_drops_missing_segments():
     assert sl.render(model="Opus", context_pct=10, color=False) == "Opus 10%"
-    assert sl.render(profile="w", remaining_pct=90, color=False) == "W 90%"
+    assert sl.render(profile="w", remaining_pct=90, color=False) == "w 90%"
     assert sl.render(repo="proj", color=False) == "proj"
     assert sl.render(color=False) == ""
 

@@ -984,7 +984,8 @@ def _statusline_active(switcher) -> tuple[str | None, str | None, float | None]:
     for acc in snap.accounts:
         if acc.number != active:
             continue
-        profile = acc.alias or acc.email.split("@", 1)[0]
+        # Alias (custom label) shown as typed; email-prefix fallback lowercased.
+        profile = acc.alias or acc.email.split("@", 1)[0].lower()
         last_good = acc.usage.last_good
         five = last_good.get("five_hour") if isinstance(last_good, dict) else None
         store_remaining = None

@@ -166,7 +166,9 @@ def render(
     # 1) profile + draining usage
     tokens: list[str] = []
     if profile:
-        tokens.append(_paint(profile_hex or PROFILE_DEFAULT_HEX, profile.upper(), color=color))
+        # Shown verbatim — the caller controls case (an alias as typed, the
+        # email-prefix fallback lowercased), so nothing is force-uppercased.
+        tokens.append(_paint(profile_hex or PROFILE_DEFAULT_HEX, profile, color=color))
     if remaining_pct is not None:
         tokens.append(_paint(draining_usage_color(remaining_pct), f"{int(remaining_pct)}%", color=color))
     if tokens:
