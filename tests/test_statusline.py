@@ -201,3 +201,108 @@ def test_uninstall_statusline(tmp_path: Path):
     data = json.loads(path.read_text(encoding="utf-8"))
     assert "statusLine" not in data and data["theme"] == "dark"
     assert sl.uninstall_statusline(path) is False
+
+
+# ============================================================================
+# Low-confidence / alert UI + active-account confidence (TDD: written first)
+# ============================================================================
+
+def test_obfuscated_constant():
+    assert sl.OBFUSCATED == "XXXXXX"
+
+
+def test_render_alert_reds_whole_bar_keeps_values():
+    # alert = something is off; the whole bar goes red but real values stay
+    # legible ("without obfuscation") so you can see which field is wrong.
+    line = sl.render(profile="personal", remaining_pct=54, model="Opus",
+                     context_pct=42, branch="main", repo="app", color=True, alert=True)
+    assert "personal" in line and "54%" in line and "main" in line  # values kept
+    # every colored run is red, and every color is closed
+    import re
+    codes = re.findall(r"\033\[38;2;(\d+;\d+;\d+)m", line)
+    assert codes and all(c == "208;50;43" for c in codes)  # _RED #d0322b
+    assert line.count("\033[38;2;") == line.count("\033[0m")
+
+
+def test_render_unknown_profile_obfuscates_and_reds():
+    line = sl.render(profile="personal", remaining_pct=54, model="Opus", color=False,
+                     unknown={"profile"})
+    assert line == "XXXXXX 54% │ Opus"      # profile hidden, rest legible
+
+
+def test_render_unknown_usage_shows_pct_placeholder():
+    line = sl.render(profile="personal", remaining_pct=54, model="Opus", color=False,
+                     unknown={"usage"})
+    assert line == "personal XX% │ Opus"    # usage can't be trusted → XX%
+
+
+def test_render_unknown_context_placeholder():
+    line = sl.render(model="Opus", context_pct=42, color=False, unknown={"context"})
+    assert line == "Opus XX%"
+
+
+def test_render_unknown_multiple_and_implies_alert_color():
+    line = sl.render(profile="p", remaining_pct=9, model="Opus", branch="main",
+                     repo="app", color=True, unknown={"profile", "usage"})
+    # obfuscated fields present, and the bar is all red (unknown implies alert)
+    assert "XXXXXX" in line and "XX%" in line
+    import re
+    codes = set(re.findall(r"\033\[38;2;(\d+;\d+;\d+)m", line))
+    assert codes == {"208;50;43"}
+
+
+def test_render_full_obfuscation_across_bar():
+    line = sl.render(profile="p", remaining_pct=1, model="Opus", context_pct=99,
+                     branch="main", repo="app", color=False,
+                     unknown={"profile", "usage", "model", "context", "branch", "repo"})
+    assert line == "XXXXXX XX% │ XXXXXX XX% │ ⎇ XXXXXX │ XXXXXX"
+
+
+# --- resolve_profile_and_usage: the confidence decision (pure) ---------------
+
+def test_resolve_trusted_account_payload_usage():
+    profile, remaining, unknown = sl.resolve_profile_and_usage(
+        active_profile="personal", has_live_login=True, source="payload",
+        store_remaining=None, payload_remaining=54)
+    assert (profile, remaining, unknown) == ("personal", 54, set())
+
+
+def test_resolve_trusted_account_store_usage_during_grace():
+    profile, remaining, unknown = sl.resolve_profile_and_usage(
+        active_profile="personal", has_live_login=True, source="store",
+        store_remaining=63, payload_remaining=54)
+    assert (profile, remaining, unknown) == ("personal", 63, set())
+
+
+def test_resolve_unrecognized_live_login_obfuscates_profile():
+    # A live login cswap can't identify → we must NOT show a confident name.
+    profile, remaining, unknown = sl.resolve_profile_and_usage(
+        active_profile=None, has_live_login=True, source="payload",
+        store_remaining=None, payload_remaining=None)
+    assert profile == sl.OBFUSCATED
+    assert "profile" in unknown
+    assert "usage" in unknown           # no usage either → also flagged
+    assert remaining is None
+
+
+def test_resolve_unrecognized_live_login_still_shows_payload_usage():
+    profile, remaining, unknown = sl.resolve_profile_and_usage(
+        active_profile=None, has_live_login=True, source="payload",
+        store_remaining=None, payload_remaining=71)
+    assert profile == sl.OBFUSCATED and "profile" in unknown
+    assert remaining == 71 and "usage" not in unknown
+
+
+def test_resolve_no_login_shows_nothing_no_alert():
+    profile, remaining, unknown = sl.resolve_profile_and_usage(
+        active_profile=None, has_live_login=False, source="payload",
+        store_remaining=None, payload_remaining=None)
+    assert (profile, remaining, unknown) == (None, None, set())
+
+
+def test_resolve_trusted_account_but_usage_unknown_flags_usage():
+    profile, remaining, unknown = sl.resolve_profile_and_usage(
+        active_profile="personal", has_live_login=True, source="store",
+        store_remaining=None, payload_remaining=None)
+    assert profile == "personal" and remaining is None
+    assert unknown == {"usage"}         # know the account, can't vouch for usage

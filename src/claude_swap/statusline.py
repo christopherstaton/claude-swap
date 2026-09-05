@@ -50,6 +50,14 @@ _ORANGE = "e8890c"
 _YELLOW = "e0c020"
 _RED = "d0322b"
 
+# Low-confidence display: a field we can't vouch for is obfuscated so a wrong
+# value can never masquerade as right — critical for the profile, since it says
+# which account is burning tokens. `unknown` fields render as these placeholders
+# and force the whole bar red ("alert"), while trusted fields stay legible.
+OBFUSCATED = "XXXXXX"
+_PCT_UNKNOWN = "XX%"
+_FIELDS = ("profile", "usage", "model", "context", "branch", "repo")
+
 
 def _paint(hex_color: str | None, text: str, *, color: bool) -> str:
     """Wrap ``text`` in a 24-bit ANSI color, or return it plain."""
@@ -154,44 +162,109 @@ def render(
     branch: str | None = None,
     repo: str | None = None,
     color: bool = True,
+    alert: bool = False,
+    unknown=(),
 ) -> str:
     """Assemble the ``profile usage │ model effort ctx │ ⎇ branch │ repo`` line.
 
     Any segment whose data is missing is dropped, and the ``│`` separators
     collapse so there's never a dangling divider. ``remaining_pct`` is the
     *remaining* 5h quota (drains toward 0); ``context_pct`` is context *used*.
+
+    **Low-confidence UI.** ``unknown`` is a set of field names
+    (``profile``/``usage``/``model``/``context``/``branch``/``repo``) we can't
+    vouch for: each renders as a placeholder (``XXXXXX`` for text, ``XX%`` for a
+    percent) so a wrong value never reads as right. Any ``unknown`` field — or
+    an explicit ``alert=True`` — turns the **whole bar red**, but the trusted
+    fields keep their real values ("without obfuscation") so you can see exactly
+    which one is off.
     """
+    unknown = set(unknown)
+    alert = alert or bool(unknown)
+
+    def paint(base_hex: str, text: str) -> str:
+        return _paint(_RED if alert else base_hex, text, color=color)
+
     groups: list[str] = []
 
     # 1) profile + draining usage
     tokens: list[str] = []
     if profile:
-        # Shown verbatim — the caller controls case (an alias as typed, the
-        # email-prefix fallback lowercased), so nothing is force-uppercased.
-        tokens.append(_paint(profile_hex or PROFILE_DEFAULT_HEX, profile, color=color))
-    if remaining_pct is not None:
-        tokens.append(_paint(draining_usage_color(remaining_pct), f"{int(remaining_pct)}%", color=color))
+        # Verbatim — the caller controls case (alias as typed, email-prefix
+        # fallback lowercased); obfuscated when we can't confirm the account.
+        tokens.append(paint(profile_hex or PROFILE_DEFAULT_HEX,
+                            OBFUSCATED if "profile" in unknown else profile))
+    if "usage" in unknown:
+        tokens.append(paint(_RED, _PCT_UNKNOWN))
+    elif remaining_pct is not None:
+        tokens.append(paint(draining_usage_color(remaining_pct), f"{int(remaining_pct)}%"))
     if tokens:
         groups.append(" ".join(tokens))
 
     # 2) model + effort + context%
     tokens = []
     if model:
-        label = f"{model} {effort}" if effort else model
-        tokens.append(_paint(COL_MODEL, label, color=color))
-    if context_pct is not None:
-        tokens.append(_paint(context_color(context_pct), f"{int(context_pct)}%", color=color))
+        label = OBFUSCATED if "model" in unknown else (f"{model} {effort}" if effort else model)
+        tokens.append(paint(COL_MODEL, label))
+    if "context" in unknown:
+        tokens.append(paint(_RED, _PCT_UNKNOWN))
+    elif context_pct is not None:
+        tokens.append(paint(context_color(context_pct), f"{int(context_pct)}%"))
     if tokens:
         groups.append(" ".join(tokens))
 
     # 3) branch, 4) repo
     if branch:
-        groups.append(_paint(COL_BRANCH, f"{BRANCH_GLYPH} {branch}", color=color))
+        groups.append(paint(COL_BRANCH, f"{BRANCH_GLYPH} {OBFUSCATED if 'branch' in unknown else branch}"))
     if repo:
-        groups.append(_paint(COL_REPO, repo, color=color))
+        groups.append(paint(COL_REPO, OBFUSCATED if "repo" in unknown else repo))
 
-    sep = _paint(COL_SEP, SEP, color=color) if color else SEP
+    sep = _paint(_RED if alert else COL_SEP, SEP, color=color) if color else SEP
     return sep.join(groups)
+
+
+def resolve_profile_and_usage(
+    *,
+    active_profile: str | None,
+    has_live_login: bool,
+    source: str,
+    store_remaining: float | None,
+    payload_remaining: float | None,
+) -> tuple[str | None, float | None, set[str]]:
+    """Decide the profile label, remaining usage %, and which fields are untrusted.
+
+    This is the confidence core — it guarantees the statusline never *confidently*
+    shows the wrong account or usage:
+
+    - ``active_profile`` set (cswap resolved a managed account whose identity
+      matches the live login) → show it, trusted.
+    - No managed active account but there **is** a live login cswap can't
+      identify → obfuscate the profile (``XXXXXX``): we can't say which account
+      is burning tokens, so we refuse to guess.
+    - No login at all → no profile, no alarm.
+
+    Usage prefers the store during the switch grace, else the live payload; if
+    neither is available while an account (managed or unrecognized) is active,
+    the usage % is flagged ``unknown`` (shown as ``XX%``).
+    """
+    unknown: set[str] = set()
+    if active_profile is not None:
+        profile: str | None = active_profile
+    elif has_live_login:
+        profile = OBFUSCATED
+        unknown.add("profile")
+    else:
+        profile = None
+
+    if source == "store" and store_remaining is not None:
+        remaining = store_remaining
+    elif payload_remaining is not None:
+        remaining = payload_remaining
+    else:
+        remaining = None
+        if profile is not None or has_live_login:
+            unknown.add("usage")
+    return profile, remaining, unknown
 
 
 # --- switch-instant usage source (per-session state) ---------------------------

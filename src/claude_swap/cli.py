@@ -1082,13 +1082,18 @@ Examples:
 
     # Never let a statusline error break Claude Code's prompt: the stdin-derived
     # segments (model/effort/context/branch/repo) still render on any failure.
-    profile = None
+    active_profile = None
     profile_hex = None
     store_remaining = None
+    has_live = False
     source = "payload"
     try:
         switcher = ClaudeAccountSwitcher(debug=args.debug)
-        profile, email, store_remaining = _statusline_active(switcher)
+        # has_live_login() is True even for a login cswap can't identify;
+        # _statusline_active() returns a profile only for a *trusted* managed
+        # active account — the two together drive the confidence decision.
+        has_live = switcher.has_live_login()
+        active_profile, email, store_remaining = _statusline_active(switcher)
         if email:
             profile_hex = load_statusline_colors(switcher.backup_dir).get(email)
         # Switch-instant grace: prefer the store for 60s after an account change,
@@ -1103,12 +1108,10 @@ Examples:
         pass
 
     payload_remaining = 100.0 - inp.five_hour_used if inp.five_hour_used is not None else None
-    if source == "store" and store_remaining is not None:
-        remaining = store_remaining
-    elif payload_remaining is not None:
-        remaining = payload_remaining
-    else:
-        remaining = store_remaining
+    profile, remaining, unknown = sl.resolve_profile_and_usage(
+        active_profile=active_profile, has_live_login=has_live, source=source,
+        store_remaining=store_remaining, payload_remaining=payload_remaining,
+    )
 
     print(sl.render(
         profile=profile,
@@ -1120,6 +1123,7 @@ Examples:
         branch=branch,
         repo=repo,
         color=color,
+        unknown=unknown,
     ))
 
 
