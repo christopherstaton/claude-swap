@@ -1,8 +1,8 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
+  # Fork policy: run the test pipeline only for PRs into main (not on direct
+  # pushes) — every change lands via a reviewed, CI-gated pull request.
   pull_request:
     branches: [main]
 
