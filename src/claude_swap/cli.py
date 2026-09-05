@@ -1274,6 +1274,111 @@ Examples:
           "(auto-swap away at this usage)")
 
 
+def _ui_print_show(bundle: dict) -> None:
+    """Human-readable overview of the current UI settings."""
+    mb = bundle.get("menubar", {})
+    print(bolded("cswap UI settings"))
+    print(f"  statusline installed: {'yes' if bundle.get('statuslineInstalled') else 'no'}")
+    if mb:
+        print("  menu bar: " + " · ".join(f"{k}={v}" for k, v in mb.items()))
+    accounts = bundle.get("accounts", [])
+    if accounts:
+        print("  accounts:")
+        for e in accounts:
+            bits = []
+            if e.get("label"):
+                bits.append(f"label '{e['label']}'")
+            if e.get("color"):
+                bits.append(f"color #{e['color']}")
+            if e.get("threshold") is not None:
+                bits.append(f"auto-swap {e['threshold']:g}%")
+            if e.get("titlePct"):
+                bits.append(f"title {e['titlePct']}")
+            print(f"    {e['email']}" + (": " + ", ".join(bits) if bits else "  (no custom UI)"))
+    else:
+        print("  accounts: none managed")
+    print(dimmed("  export: cswap ui export [file]   ·   import: cswap ui import <file>"))
+
+
+def _ui_command(argv: list[str]) -> None:
+    """Handle `cswap ui [show|export [FILE]|import FILE]` — save/share the UI setup.
+
+    Exports the statusline + menu-bar look (per-account labels/colors/thresholds
+    and global prefs — never credentials) to one JSON bundle, and applies it on
+    another machine. Pre-dispatched, so it must be the first argument.
+    """
+    from pathlib import Path
+
+    from claude_swap import ui_settings as uis
+
+    parser = argparse.ArgumentParser(
+        prog="cswap ui",
+        description="Show, export, or import the statusline / menu-bar UI settings.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap ui                        # show the current UI settings
+  cswap ui export                 # write ~/cswap-ui.json (share it to another Mac)
+  cswap ui export ui.json         # write to a path ('-' = stdout)
+  cswap ui import ui.json         # apply a bundle; lists accounts still to add
+        """,
+    )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    sub = parser.add_subparsers(dest="action", metavar="{show,export,import}")
+    sub.add_parser("show", help="Show the current UI settings (the default)")
+    p_exp = sub.add_parser("export", help="Write the UI settings to a shareable JSON bundle")
+    p_exp.add_argument("file", nargs="?", metavar="FILE",
+                       help="Output path (default ~/cswap-ui.json; '-' for stdout)")
+    p_imp = sub.add_parser("import", help="Apply a UI bundle from another machine")
+    p_imp.add_argument("file", metavar="FILE", help="Bundle path ('-' for stdin)")
+    p_imp.add_argument("--no-labels", action="store_true",
+                       help="Apply colors/thresholds but not account aliases/labels")
+    args = parser.parse_args(argv)
+
+    switcher = ClaudeAccountSwitcher(debug=args.debug)
+
+    if args.action in (None, "show"):
+        _ui_print_show(uis.collect_ui_settings(switcher))
+        return
+
+    if args.action == "export":
+        bundle = uis.collect_ui_settings(switcher)
+        if args.file == "-":
+            print(json.dumps(bundle, indent=2))
+            return
+        path = Path(args.file) if args.file else Path.home() / "cswap-ui.json"
+        uis.write_bundle(path, bundle)
+        print(f"Exported UI settings ({len(bundle['accounts'])} account(s)) to {path}")
+        print(dimmed("Copy it to another Mac and run:  cswap ui import <file>"))
+        return
+
+    # import
+    try:
+        bundle = json.loads(sys.stdin.read()) if args.file == "-" else uis.read_bundle(Path(args.file))
+        result = uis.apply_ui_settings(switcher, bundle, set_labels=not args.no_labels)
+    except (ClaudeSwitchError, ValueError, OSError) as e:
+        error(f"Error: {e}")
+        sys.exit(1)
+
+    if result["applied"]:
+        print(f"Applied UI to {len(result['applied'])} account(s): {', '.join(result['applied'])}")
+    else:
+        print("Applied global menu-bar prefs (no matching accounts on this Mac yet).")
+    for s in result["skipped"]:
+        warning(f"skipped {s}")
+    if result["pending"]:
+        print("\nPending — these accounts from the bundle aren't set up here yet:")
+        for e in result["pending"]:
+            label = e.get("label") or e["email"].split("@", 1)[0]
+            extra = "".join([
+                f", color #{e['color']}" if e.get("color") else "",
+                f", auto-swap {e['threshold']:g}%" if e.get("threshold") is not None else "",
+            ])
+            print(f"  {e['email']}  → label '{label}'{extra}")
+        print(dimmed("Log into each in Claude Code, run `cswap add`, then re-run "
+                     "`cswap ui import <file>` to apply their look (import is idempotent)."))
+
+
 def main() -> None:
     """Main entry point for the CLI."""
     force_utf8_output()
@@ -1308,6 +1413,9 @@ def main() -> None:
         return
     if argv and argv[0] == "threshold":
         _threshold_command(argv[1:])
+        return
+    if argv and argv[0] == "ui":
+        _ui_command(argv[1:])
         return
     if argv and argv[0] == "map":
         _map_command(argv[1:])
@@ -1370,6 +1478,7 @@ Commands:
   %(prog)s statusline [--install]     Claude Code statusline (active account + usage)
   %(prog)s usage [num|email]          show an account's current token usage
   %(prog)s threshold [num|email pct]  show/set per-account auto-swap-away caps
+  %(prog)s ui [export|import FILE]     save/share the statusline + menu-bar UI
   %(prog)s unclaimed [--purge ID]     list or drop stashed credential entries
   %(prog)s export <path>              export accounts
   %(prog)s import <path>              import accounts

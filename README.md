@@ -300,6 +300,18 @@ cswap threshold             # list the global + per-account thresholds
 
 Both `cswap auto` and the menu-bar engine honor these caps.
 
+### Share your UI setup across machines (`cswap ui`)
+
+`cswap ui` saves the statusline + menu-bar **look** — global display prefs and, per account (by email), the custom label, brand color, auto-swap cap, and title override — into one portable JSON bundle. **No credentials are ever included.**
+
+```bash
+cswap ui                      # show the current UI settings
+cswap ui export               # write ~/cswap-ui.json (copy it to the other Mac)
+cswap ui import ~/cswap-ui.json
+```
+
+On import, accounts are matched by email: matching ones get their label/color/cap applied immediately; accounts you haven't added yet are listed as **pending**. Log into each in Claude Code, run `cswap add`, then re-run `cswap ui import` (it's idempotent) to apply their look — so setting up a second machine is: install, import the bundle, add each account.
+
 ## Advanced
 
 ### Configuration
