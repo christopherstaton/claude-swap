@@ -61,6 +61,21 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
     return int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
 
 
+def _icon_face(util_pct: float | None) -> tuple[str, str]:
+    """Text + background hex for the tray icon — both express *remaining* quota.
+
+    ``util_pct`` is utilization (0-100, higher = more used). The icon shows
+    remaining (100 − used) as the number *and* via the draining colour band, so a
+    fresh account reads ~100 in green and drains toward 0 in red — the same
+    100→0 language as the menu-bar title. ``None`` is a neutral 'unknown' face.
+    """
+    if util_pct is None:
+        return "–", _NEUTRAL
+    util = max(0.0, min(100.0, float(util_pct)))
+    remaining = 100.0 - util
+    return str(int(round(remaining))), _draining_color_hex(remaining)
+
+
 # ---------------------------------------------------------------------------
 # Pure menu model
 # ---------------------------------------------------------------------------
@@ -334,21 +349,18 @@ def build_tooltip(view: dict, settings) -> str:
 
 
 def render_icon_image(util_pct: float | None, *, size: int = 64):
-    """Draw a tray icon: the binding utilization ``%`` on a remaining-quota band.
+    """Draw a tray icon showing *remaining* quota (100→0) on a draining colour band.
 
-    ``util_pct`` is utilization (0-100, higher = more used); ``None`` renders a
-    neutral 'usage unknown' icon. Returns a ``PIL.Image`` (RGBA). Pillow is
-    imported lazily so this module stays import-safe without the ``[tray]`` extra.
+    ``util_pct`` is utilization (0-100, higher = more used); the icon renders the
+    remaining % (100 − used) as both the number and the colour, so it matches the
+    menu-bar title's 100→0 style. ``None`` renders a neutral 'usage unknown' icon.
+    Returns a ``PIL.Image`` (RGBA). Pillow is imported lazily so this module stays
+    import-safe without the ``[tray]`` extra.
     """
     from PIL import Image, ImageDraw, ImageFont
 
-    if util_pct is None:
-        bg = _hex_to_rgb(_NEUTRAL)
-        text = "–"
-    else:
-        util = max(0.0, min(100.0, float(util_pct)))
-        bg = _hex_to_rgb(_draining_color_hex(100.0 - util))
-        text = str(int(round(util)))
+    text, bg_hex = _icon_face(util_pct)
+    bg = _hex_to_rgb(bg_hex)
 
     img = Image.new("RGBA", (size, size), (*bg, 255))
     draw = ImageDraw.Draw(img)

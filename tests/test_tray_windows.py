@@ -409,6 +409,24 @@ def test_render_icon_clamps_out_of_range_without_error():
     assert tray.render_icon_image(-20, size=16).size == (16, 16)
 
 
+def test_icon_face_number_and_color_are_remaining():
+    # utilization in -> the icon shows REMAINING (100 - used) as both number and band
+    assert tray._icon_face(10) == ("90", statusline.draining_usage_color(90))
+    assert tray._icon_face(95) == ("5", statusline.draining_usage_color(5))
+    assert tray._icon_face(0) == ("100", statusline.draining_usage_color(100))
+    assert tray._icon_face(100) == ("0", statusline.draining_usage_color(0))
+
+
+def test_icon_face_none_is_neutral():
+    text, _hex = tray._icon_face(None)
+    assert text == "–"
+
+
+def test_icon_face_clamps_out_of_range():
+    assert tray._icon_face(150)[0] == "0"     # >100 used -> 0 left
+    assert tray._icon_face(-20)[0] == "100"   # negative used -> 100 left
+
+
 # ============================================================================
 # build_tooltip — reuses menubar.format_title
 # ============================================================================
