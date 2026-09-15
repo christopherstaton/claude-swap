@@ -271,15 +271,18 @@ UCHICAGO 54% │ Opus high 42% │ ⎇ main │ luet-apps
 └ profile+usage ┘ └ model effort ctx% ┘ └ branch ┘ └ repo ┘
 ```
 
-It reads Claude's own live payload fields — `rate_limits.five_hour.used_percentage`, `context_window.used_percentage`, `effort.level` — so there's nothing to fetch. The usage is shown as **remaining** quota and color-bands as it drains (green → yellow → red); context% bands to signal when `/clear` would help. On an account switch it sources usage from cswap's store for a 60s grace window (keyed per session on `session_id`) so the % matches the new profile instantly, before Claude's payload catches up.
+It reads Claude's own live payload fields — `rate_limits.five_hour.used_percentage`, `context_window.used_percentage`, `effort.level` — so there's nothing to fetch. The usage is shown as **remaining** quota and color-bands as it drains (green → yellow → red); context% bands to signal when `/clear` would help. Remaining is clamped to 0–100, so a 5h window that overruns (used > 100%) shows `0%`, never a negative like `-4%`. On an account switch it sources usage from cswap's store for a 60s grace window (keyed per session on `session_id`) so the % matches the new profile instantly, before Claude's payload catches up.
+
+**Every window stays current.** A Claude Code session only updates its own `rate_limits` when it makes an API call, so an idle background window's usage would otherwise freeze. Each window folds its reading into one shared per-account record and reads back the freshest value, so the busy window keeps the idle ones up to date — all your terminals show the same, current profile and usage. Lower `--refresh` to make them converge sooner.
 
 ```bash
 cswap statusline --install                # wire it in (~/.claude/settings.json, 30s refresh)
+cswap statusline --install --refresh 10   # re-render every 10s (windows update sooner)
 cswap statusline --uninstall              # remove it
 cswap statusline --set-color 1 800000     # per-account brand color (UChicago maroon)
 ```
 
-Flags: `--no-color` (also honors `NO_COLOR`), `--no-branch`.
+`--refresh SECONDS` sets how often Claude Code re-runs the line even while idle (default 30). Lower = each window reflects a switch or the latest usage faster, at the cost of running the command more often. Flags: `--no-color` (also honors `NO_COLOR`), `--no-branch`.
 
 ### Budget by usage (`cswap usage`, `cswap threshold`)
 

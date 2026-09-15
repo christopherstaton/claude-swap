@@ -118,6 +118,104 @@ def test_render_color_truecolor_and_balanced_resets():
     assert line.count("\033[38;2;") == line.count("\033[0m")  # every color closed
 
 
+# --- overrun clamp: remaining 5h quota is 0–100, never negative ("-4%" bug) ----
+# Claude's rate_limits.five_hour.used_percentage can come back OVER 100 when a
+# window overruns (an in-flight task pushes past the cap before the reset), which
+# made a naive 100 - used render as "-4%". Remaining quota is 0–100 by definition.
+
+def test_remaining_from_used_clamps_overrun_to_zero():
+    assert sl.remaining_from_used(104) == 0.0     # the real bug: 100 - 104 = -4 → 0
+    assert sl.remaining_from_used(100) == 0.0
+    assert sl.remaining_from_used(63) == 37.0
+    assert sl.remaining_from_used(0) == 100.0
+
+
+def test_remaining_from_used_clamps_below_zero_used_to_hundred():
+    assert sl.remaining_from_used(-5) == 100.0    # a bogus negative used → full
+
+
+def test_remaining_from_used_passes_through_none():
+    assert sl.remaining_from_used(None) is None
+
+
+def test_render_clamps_negative_remaining_to_zero():
+    # Defense in depth: even a caller that hands render a negative/over value
+    # shows 0%..100%, never "-4%".
+    assert sl.render(profile="personal", remaining_pct=-4, color=False) == "personal 0%"
+    assert sl.render(profile="personal", remaining_pct=140, color=False) == "personal 100%"
+
+
+def test_render_overrun_remaining_is_red_not_negative():
+    line = sl.render(profile="personal", remaining_pct=-4, color=True)
+    assert "-4" not in line
+    assert "\033[38;2;208;50;43m" in line          # #d0322b (empty → red) applied
+
+
+# --- cross-window live usage (stale-session fix) ------------------------------
+# Every window folds its fresh payload into a shared per-account record so idle
+# windows reflect the busy window's rising usage. Usage rises monotonically in a
+# 5h window (max used% = freshest); a jumped resets_at = window rolled over.
+
+def test_merge_live_usage_first_reading_creates_record():
+    rec = sl.merge_live_usage(None, five_hour_used=30.0, resets_at=5000.0, now=100.0)
+    assert rec["five_hour_used"] == 30.0
+    assert rec["resets_at"] == 5000.0
+    assert rec["updated_at"] == 100.0
+
+
+def test_merge_live_usage_same_window_keeps_higher_used():
+    prev = {"five_hour_used": 50.0, "resets_at": 5000.0, "updated_at": 100.0}
+    # a busy window pushes usage up
+    rec = sl.merge_live_usage(prev, five_hour_used=62.0, resets_at=5000.0, now=200.0)
+    assert rec["five_hour_used"] == 62.0
+    assert rec["updated_at"] == 200.0
+
+
+def test_merge_live_usage_idle_window_cannot_drag_usage_down():
+    # An idle window with a frozen, lower payload must NOT lower the shared value.
+    prev = {"five_hour_used": 62.0, "resets_at": 5000.0, "updated_at": 200.0}
+    rec = sl.merge_live_usage(prev, five_hour_used=30.0, resets_at=5000.0, now=300.0)
+    assert rec["five_hour_used"] == 62.0
+
+
+def test_merge_live_usage_window_rollover_takes_new_lower_value():
+    # resets_at jumped forward → a new 5h window began; the lower reading is real.
+    prev = {"five_hour_used": 95.0, "resets_at": 5000.0, "updated_at": 200.0}
+    rec = sl.merge_live_usage(prev, five_hour_used=4.0, resets_at=23000.0, now=300.0)
+    assert rec["five_hour_used"] == 4.0
+    assert rec["resets_at"] == 23000.0
+
+
+def test_merge_live_usage_ignores_older_window_reading():
+    # A payload from an EARLIER window (resets_at in the past) is stale — ignore.
+    prev = {"five_hour_used": 10.0, "resets_at": 23000.0, "updated_at": 300.0}
+    rec = sl.merge_live_usage(prev, five_hour_used=95.0, resets_at=5000.0, now=310.0)
+    assert rec == prev
+
+
+def test_merge_live_usage_none_payload_keeps_prev():
+    prev = {"five_hour_used": 62.0, "resets_at": 5000.0, "updated_at": 200.0}
+    assert sl.merge_live_usage(prev, five_hour_used=None, resets_at=None, now=400.0) == prev
+    assert sl.merge_live_usage(None, five_hour_used=None, resets_at=None, now=400.0) is None
+
+
+def test_merge_live_usage_missing_resets_at_treated_as_same_window():
+    prev = {"five_hour_used": 40.0, "resets_at": None, "updated_at": 100.0}
+    rec = sl.merge_live_usage(prev, five_hour_used=55.0, resets_at=None, now=200.0)
+    assert rec["five_hour_used"] == 55.0
+
+
+def test_live_usage_file_round_trip_and_bad_read(tmp_path: Path):
+    path = sl.live_usage_path(tmp_path)
+    assert path.name == ".statusline-live.json"
+    sl.write_live_usage(path, {"a@x.com": {"five_hour_used": 62.0, "resets_at": 5.0, "updated_at": 1.0}})
+    got = sl.read_live_usage(path)
+    assert got["a@x.com"]["five_hour_used"] == 62.0
+    assert sl.read_live_usage(tmp_path / "missing.json") == {}
+    path.write_text("{ broken", encoding="utf-8")
+    assert sl.read_live_usage(path) == {}
+
+
 # --- switch-instant usage source ----------------------------------------------
 
 def test_usage_source_first_sight_uses_store():

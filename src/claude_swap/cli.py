@@ -986,11 +986,12 @@ def _statusline_active(switcher) -> tuple[str | None, str | None, float | None]:
             continue
         # Alias (custom label) shown as typed; email-prefix fallback lowercased.
         profile = acc.alias or acc.email.split("@", 1)[0].lower()
+        from claude_swap import statusline as sl
         last_good = acc.usage.last_good
         five = last_good.get("five_hour") if isinstance(last_good, dict) else None
         store_remaining = None
         if isinstance(five, dict) and isinstance(five.get("pct"), (int, float)):
-            store_remaining = 100.0 - float(five["pct"])
+            store_remaining = sl.remaining_from_used(float(five["pct"]))
         return profile, acc.email, store_remaining
     return None, None, None
 
@@ -1031,6 +1032,9 @@ Examples:
     )
     parser.add_argument("--install", action="store_true",
                         help="Add the statusline to ~/.claude/settings.json (30s refresh)")
+    parser.add_argument("--refresh", type=int, default=30, metavar="SECONDS",
+                        help="Refresh interval for --install (default 30; lower = windows "
+                             "re-render and reflect the current account/usage sooner)")
     parser.add_argument("--uninstall", action="store_true",
                         help="Remove the statusline from ~/.claude/settings.json")
     parser.add_argument("--set-color", nargs=2, metavar=("NUM|EMAIL", "HEX"),
@@ -1051,9 +1055,10 @@ Examples:
             print(f"Removed statusline from {path}" if removed
                   else f"No statusline configured in {path}")
         else:
-            sl.install_statusline(path)
-            print(f"Installed statusline in {path}\nStart a new Claude Code "
-                  "session (or run /statusline) to see it.")
+            refresh = max(1, args.refresh)
+            sl.install_statusline(path, refresh_interval=refresh)
+            print(f"Installed statusline in {path} (refresh every {refresh}s)\n"
+                  "Start a new Claude Code session (or run /statusline) to see it.")
         return
 
     if args.set_color or args.unset_color:
@@ -1087,6 +1092,10 @@ Examples:
     store_remaining = None
     has_live = False
     source = "payload"
+    # Cross-window usage: idle windows freeze their own payload, so we share the
+    # freshest reading through a per-account record (see statusline.merge_live_usage).
+    # Defaults to this window's raw payload if the shared read/merge can't run.
+    live_remaining = sl.remaining_from_used(inp.five_hour_used)
     try:
         switcher = ClaudeAccountSwitcher(debug=args.debug)
         # has_live_login() is True even for a login cswap can't identify;
@@ -1104,13 +1113,30 @@ Examples:
         source, new_state = sl.usage_source(sl.read_session_state(spath), email, now)
         sl.write_session_state(spath, new_state)
         sl.prune_session_states(state_dir, now)
+        # Fold this window's payload into the shared per-account record — but only
+        # once the switch grace is over (source=="payload"), because during the
+        # grace the payload still reports the OLD account and would poison the new
+        # account's record. All windows then read back the freshest value.
+        if email and source == "payload":
+            lpath = sl.live_usage_path(state_dir)
+            live = sl.read_live_usage(lpath)
+            merged = sl.merge_live_usage(
+                live.get(email), five_hour_used=inp.five_hour_used,
+                resets_at=inp.five_hour_resets_at, now=now,
+            )
+            if merged is not None:
+                live[email] = merged
+                live = {e: r for e, r in live.items() if isinstance(r, dict)
+                        and now - r.get("updated_at", 0) < sl.STATE_MAX_AGE_S}
+                sl.write_live_usage(lpath, live)
+                if merged.get("five_hour_used") is not None:
+                    live_remaining = sl.remaining_from_used(merged["five_hour_used"])
     except Exception:
         pass
 
-    payload_remaining = 100.0 - inp.five_hour_used if inp.five_hour_used is not None else None
     profile, remaining, unknown = sl.resolve_profile_and_usage(
         active_profile=active_profile, has_live_login=has_live, source=source,
-        store_remaining=store_remaining, payload_remaining=payload_remaining,
+        store_remaining=store_remaining, payload_remaining=live_remaining,
     )
 
     print(sl.render(
@@ -1194,7 +1220,8 @@ Examples:
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
             used = float(window["pct"])
             extra = f" (resets {window['clock']})" if window.get("clock") else ""
-            print(f"  {name}: {used:.0f}% used · {100 - used:.0f}% left{extra}")
+            left = max(0.0, 100.0 - used)   # overrun (used > 100) clamps to 0, not "-4%"
+            print(f"  {name}: {used:.0f}% used · {left:.0f}% left{extra}")
     for window in collected.get("scoped") or []:
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
             print(f"  {window['name']}: {window['pct']:.0f}% used")

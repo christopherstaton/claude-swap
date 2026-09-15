@@ -87,6 +87,18 @@ def test_usage_json_structure(monkeypatch, capsys, tmp_path):
     assert d["ageSeconds"] == 12.3
 
 
+def test_usage_overrun_clamps_left_to_zero(monkeypatch, capsys, tmp_path):
+    # A 5h window can report >100% used when it overruns; "left" must clamp to
+    # 0%, never render "-4% left" (the statusline "-4%" bug, same subtraction).
+    lg = {"five_hour": {"pct": 104, "clock": "06:59"}}
+    _patch(monkeypatch, _Switcher(tmp_path, [
+        _Acct("1", "c@x.com", "personal", _Usage(last_good=lg), active=True)]))
+    cli._usage_command([])
+    out = capsys.readouterr().out
+    assert "104% used · 0% left" in out
+    assert "-4%" not in out and "-4 %" not in out
+
+
 def test_usage_specific_account_not_active(monkeypatch, capsys, tmp_path):
     _patch(monkeypatch, _Switcher(tmp_path, [
         _Acct("1", "a@x.com", "alpha", _Usage(last_good={"five_hour": {"pct": 10}}), active=True),

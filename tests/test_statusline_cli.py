@@ -126,6 +126,50 @@ def test_cli_swap_reflects_new_account_and_usage(monkeypatch, capsys, tmp_path):
     assert out2 == "beta 20% │ Opus"         # B: 80% used → 20% left (switch-instant store)
 
 
+# --- stale-session fix: all windows reflect the current usage -------------------
+
+def _seed_past_grace(tmp_path, sid, email):
+    state_dir = tmp_path / "cache"
+    state_dir.mkdir(exist_ok=True)
+    sl.write_session_state(sl.session_state_path(state_dir, sid),
+                           {"account": email, "switched_at": time.time() - 999})
+
+
+def test_cli_idle_window_reflects_busy_windows_usage(monkeypatch, capsys, tmp_path):
+    # Two windows on the same account past the grace. The busy window's payload is
+    # at 46% used; the idle window's own payload froze earlier at 20%. The idle
+    # window must show the busy window's *fresher* usage (54% left), not its own
+    # stale 80% — this is the whole point of the cross-window record.
+    sw = _FakeSwitcher(tmp_path, active="1", has_live=True,
+                       accounts=[_acct("1", "personal", "c@x.com", 37, active=True)])
+    _seed_past_grace(tmp_path, "busy", "c@x.com")
+    _seed_past_grace(tmp_path, "idle", "c@x.com")
+
+    busy = _run(monkeypatch, capsys, sw,
+                {"session_id": "busy", "model": {"display_name": "Opus"},
+                 "rate_limits": {"five_hour": {"used_percentage": 46, "resets_at": 5000}}})
+    assert busy == "personal 54% │ Opus"       # busy window pushes 46% used into the record
+
+    idle = _run(monkeypatch, capsys, sw,
+                {"session_id": "idle", "model": {"display_name": "Opus"},
+                 "rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": 5000}}})
+    assert idle == "personal 54% │ Opus"       # idle reflects 46%, not its frozen 20%
+
+
+def test_cli_swap_grace_does_not_pollute_live_record(monkeypatch, capsys, tmp_path):
+    # During the switch grace the payload still reports the OLD account; it must
+    # NOT be folded into the NEW account's shared record (or a swap would leave a
+    # stale-high value stuck on the new account until its window reset).
+    sw = _FakeSwitcher(tmp_path, active="2", has_live=True,
+                       accounts=[_acct("2", "beta", "b@x.com", 80, active=True)])
+    out = _run(monkeypatch, capsys, sw,        # fresh session id → in grace
+               {"session_id": "fresh", "model": {"display_name": "Opus"},
+                "rate_limits": {"five_hour": {"used_percentage": 46, "resets_at": 5000}}})
+    assert out == "beta 20% │ Opus"            # store (80% used → 20%), not the laggy 46
+    live = sl.read_live_usage(sl.live_usage_path(tmp_path / "cache"))
+    assert "b@x.com" not in live               # grace guard skipped the merge
+
+
 # --- low confidence: never show a wrong account ---------------------------------
 
 def test_cli_unrecognized_live_login_obfuscates_profile(monkeypatch, capsys, tmp_path):
