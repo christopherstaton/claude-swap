@@ -23,6 +23,7 @@ Everything here is pure and import-safe except the session-state file helpers
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -89,6 +90,20 @@ def context_color(used_pct: float) -> str:
     if used_pct <= 80:
         return _ORANGE
     return _RED
+
+
+def remaining_from_used(used_pct: float | None) -> float | None:
+    """Remaining 5h/7d quota from a *used* percentage, clamped to ``[0, 100]``.
+
+    Claude's ``rate_limits`` ``used_percentage`` can exceed 100 when a window
+    overruns (an in-flight task pushes past the cap before the reset), which made
+    a naive ``100 - used`` render as ``-4%``. Remaining quota is 0–100 by
+    definition, so an overrun shows ``0%`` (empty, red), never a negative. Passes
+    ``None`` through (no usage data → no segment).
+    """
+    if used_pct is None:
+        return None
+    return max(0.0, min(100.0, 100.0 - used_pct))
 
 
 def _dig(data, *keys):
@@ -197,7 +212,10 @@ def render(
     if "usage" in unknown:
         tokens.append(paint(_RED, _PCT_UNKNOWN))
     elif remaining_pct is not None:
-        tokens.append(paint(draining_usage_color(remaining_pct), f"{int(remaining_pct)}%"))
+        # Clamp to 0–100 so an overrun (used > 100) never shows "-4%" — defense
+        # in depth on top of remaining_from_used() at the source.
+        shown = max(0.0, min(100.0, remaining_pct))
+        tokens.append(paint(draining_usage_color(shown), f"{int(shown)}%"))
     if tokens:
         groups.append(" ".join(tokens))
 
@@ -290,6 +308,80 @@ def usage_source(
     new_state = {"account": current_account, "switched_at": switched_at, "updated_at": now}
     in_grace = (now - switched_at) < grace_s
     return ("store" if in_grace else "payload"), new_state
+
+
+# --- cross-window live usage (stale-session fix) -------------------------------
+# The statusline's per-session payload freezes when a window goes idle, so idle
+# windows show stale usage while the busy window is current. Every window folds
+# its payload into ONE shared per-account record, and all windows read it back —
+# the busy window (with real-time usage) keeps the record fresh for the idle
+# ones. No network or subprocess: it just shares data each render already has.
+
+LIVE_USAGE_FILENAME = ".statusline-live.json"
+
+
+def merge_live_usage(
+    prev: dict | None,
+    *,
+    five_hour_used: float | None,
+    resets_at: float | None,
+    now: float,
+) -> dict | None:
+    """Fold this window's 5h payload into the shared per-account usage record.
+
+    Returns the record to persist *and* display (or ``None`` when there's nothing
+    to show yet). Usage rises monotonically inside a 5h window, so the highest
+    ``used`` is the most current; a ``resets_at`` that jumped forward means the
+    window rolled over and the new (lower) reading is real; a ``resets_at`` in the
+    past is a stale reading from an earlier window and is ignored.
+    """
+    if five_hour_used is None:
+        return prev  # nothing fresh to contribute; keep what we have
+    if not isinstance(prev, dict) or prev.get("five_hour_used") is None:
+        return {"five_hour_used": five_hour_used, "resets_at": resets_at, "updated_at": now}
+
+    prev_reset = prev.get("resets_at")
+    if isinstance(resets_at, (int, float)) and isinstance(prev_reset, (int, float)):
+        if resets_at > prev_reset:  # window rolled over → take the new reading
+            return {"five_hour_used": five_hour_used, "resets_at": resets_at, "updated_at": now}
+        if resets_at < prev_reset:  # reading from an older window → stale, ignore
+            return prev
+
+    # Same window (or resets_at unknown): keep the highest usage seen.
+    return {
+        "five_hour_used": max(float(prev["five_hour_used"]), float(five_hour_used)),
+        "resets_at": resets_at if resets_at is not None else prev_reset,
+        "updated_at": now,
+    }
+
+
+def live_usage_path(state_dir: Path) -> Path:
+    """Shared cross-window live-usage file (one per machine, keyed by account)."""
+    return state_dir / LIVE_USAGE_FILENAME
+
+
+def read_live_usage(path: Path) -> dict:
+    """Read the shared live-usage map (``{email: record}``); ``{}`` on any problem."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_live_usage(path: Path, data: dict) -> None:
+    """Write the shared live-usage map atomically, best-effort (never raises).
+
+    Multiple windows write this file; a tmp-file + ``replace`` keeps a concurrent
+    reader from ever seeing a torn write (a lost update self-heals next render).
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass
 
 
 def session_state_path(state_dir: Path, session_id: str | None) -> Path:
