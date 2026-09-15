@@ -495,6 +495,16 @@ def _local_part(email: str, limit: int = 12) -> str:
     return local
 
 
+def _remaining_pct(used: float) -> float:
+    """Remaining quota % for the title (100 − used), clamped to [0, 100].
+
+    The menu-bar title reads as a battery draining 100→0: a fresh account shows
+    ~100% and the number falls as quota is consumed. This is display-only —
+    ``_window_pct`` and the auto-switch engine keep working in *used* terms.
+    """
+    return max(0.0, min(100.0, 100.0 - used))
+
+
 def format_title(
     active_email: str | None,
     active_usage: dict | str | None,
@@ -508,6 +518,9 @@ def format_title(
     ``pct_override`` is the active account's per-account title-percentage
     choice (one of ``TITLE_PCT_CHOICES``); when given it wins over
     ``settings.title_pct``, so different accounts can show different windows.
+
+    Percentages are shown as *remaining* quota (100 − used) so the title drains
+    100→0 like a battery; the account name leads. See ``_remaining_pct``.
     """
     if active_email is None:
         return ICON
@@ -520,20 +533,20 @@ def format_title(
     if title_pct in ("5h", "both"):
         p = _window_pct(active_usage, "five_hour")
         if p is not None:
-            segments.append(f"{p:.0f}%")
+            segments.append(f"{_remaining_pct(p):.0f}%")
     if title_pct in ("7d", "both"):
         seven = active_usage.get("seven_day") if isinstance(active_usage, dict) else None
         seven = _rolled_weekly_window(seven, now)  # reflect a passed weekly reset
         p = seven["pct"] if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)) else None
         if p is not None:
-            segments.append(f"{p:.0f}%")
+            segments.append(f"{_remaining_pct(p):.0f}%")
     if settings.title_scoped and isinstance(active_usage, dict):
         # Per-model weekly limits (e.g. Fable), same shape/roll-forward as the
         # dropdown rows; named so multiple scoped models stay distinguishable.
         for window in active_usage.get("scoped") or []:
             window = _rolled_weekly_window(window, now)
             if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
-                segments.append(f"{window['name']} {window['pct']:.0f}%")
+                segments.append(f"{window['name']} {_remaining_pct(window['pct']):.0f}%")
     if settings.title_battery:
         bp = _binding_pct(active_usage, now)
         if bp is not None:
