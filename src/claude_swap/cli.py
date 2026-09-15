@@ -1153,6 +1153,48 @@ Examples:
     ))
 
 
+def _usage_hook_line() -> None:
+    """Print the compact usage badge for the ``UserPromptSubmit`` hook.
+
+    Store-only (never fetches), never raises, and prints at most one line — a hook
+    must never block, slow, or fail the prompt. Prefers the cross-window live 5h
+    reading (kept fresh by the statusline) so the badge matches every window.
+    """
+    from claude_swap import statusline as sl
+    from claude_swap import usage_hook as uh
+
+    line = ""
+    try:
+        switcher = ClaudeAccountSwitcher(debug=False)
+        active = switcher.current_account_number()
+        if active is not None:
+            snap = switcher.accounts_snapshot(fetch=set())  # store-only, no network
+            acc = next((a for a in snap.accounts if a.number == active), None)
+            if acc is not None:
+                profile = acc.alias or acc.email.split("@", 1)[0].lower()
+                lg = acc.usage.last_good if isinstance(acc.usage.last_good, dict) else {}
+
+                def _left(window: str) -> float | None:
+                    w = lg.get(window) if isinstance(lg, dict) else None
+                    if isinstance(w, dict) and isinstance(w.get("pct"), (int, float)):
+                        return sl.remaining_from_used(float(w["pct"]))
+                    return None
+
+                five_left, seven_left = _left("five_hour"), _left("seven_day")
+                try:  # prefer the fresher cross-window 5h reading when present
+                    rec = sl.read_live_usage(
+                        sl.live_usage_path(switcher.backup_dir / "cache")).get(acc.email)
+                    if isinstance(rec, dict) and rec.get("five_hour_used") is not None:
+                        five_left = sl.remaining_from_used(float(rec["five_hour_used"]))
+                except Exception:
+                    pass
+                line = uh.hook_line(profile, five_left, seven_left)
+    except Exception:
+        line = ""
+    if line:
+        print(line)
+
+
 def _usage_command(argv: list[str]) -> None:
     """Handle `cswap usage [NUM|EMAIL] [--json]` — current usage, for budgeting.
 
@@ -1177,8 +1219,36 @@ Examples:
     parser.add_argument("account", nargs="?", metavar="NUM|EMAIL",
                         help="Account to report (default: the active account)")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON")
+    parser.add_argument("--hook", action="store_true",
+                        help="Print a one-line usage badge for a UserPromptSubmit hook "
+                             "(store-only, never fetches, always exits 0)")
+    parser.add_argument("--install-hook", action="store_true",
+                        help="Show your usage %% at the start/end of every Claude response, "
+                             "all repos: installs a UserPromptSubmit hook + ~/.claude/CLAUDE.md line")
+    parser.add_argument("--uninstall-hook", action="store_true",
+                        help="Remove the usage-badge hook and its CLAUDE.md instruction")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args(argv)
+
+    if args.install_hook or args.uninstall_hook:
+        from claude_swap import statusline as sl
+        from claude_swap import usage_hook as uh
+        settings_path = sl.default_settings_path()
+        claude_md = uh.default_claude_md_path()
+        if args.uninstall_hook:
+            removed = uh.uninstall(settings_path, claude_md)
+            print("Removed the usage-badge hook and its CLAUDE.md instruction." if removed
+                  else "No usage-badge hook was installed.")
+        else:
+            uh.install(settings_path, claude_md)
+            print(f"Installed the usage-badge hook in {settings_path}\n"
+                  f"and the instruction in {claude_md}.\nStart a new Claude Code session — "
+                  "your usage %% will show at the start and end of each response.")
+        return
+
+    if args.hook:
+        _usage_hook_line()
+        return
 
     switcher = ClaudeAccountSwitcher(debug=args.debug)
     snap = switcher.accounts_snapshot()  # paced read (may fetch if due)

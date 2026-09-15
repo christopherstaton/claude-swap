@@ -303,6 +303,18 @@ cswap threshold             # list the global + per-account thresholds
 
 Both `cswap auto` and the menu-bar engine honor these caps.
 
+### Show your usage in every Claude response (`cswap usage --install-hook`)
+
+Have Claude Code surface the active account's remaining quota as a compact badge at the **start and end of every response, across all repos**:
+
+```bash
+cswap usage --install-hook      # wire it up (one-time)
+cswap usage --uninstall-hook    # remove it
+cswap usage --hook              # preview the line the hook emits
+```
+
+It installs two things: a **`UserPromptSubmit` hook** in `~/.claude/settings.json` that runs `cswap usage --hook` (store-only, never fetches, always exits `0`, so it can't slow or block a prompt), and a managed block in your global `~/.claude/CLAUDE.md` telling Claude to echo the badge. The hook injects one line — e.g. `cswap-usage » personal · 5h 31% left · 7d 59% left` — and Claude shows it as `personal · 31% 5h left`. The 5h figure prefers the fresh cross-window reading the statusline maintains, so it matches your other terminals. Start a new session after installing.
+
 ### Share your UI setup across machines (`cswap ui`)
 
 `cswap ui` saves the statusline + menu-bar **look** — global display prefs and, per account (by email), the custom label, brand color, auto-swap cap, and title override — into one portable JSON bundle. **No credentials are ever included.**
