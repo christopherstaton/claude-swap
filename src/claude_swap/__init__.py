@@ -1,8 +1,17 @@
-"""Multi-account switcher for Claude Code."""
+"""Multi-account switcher for Claude Code (christopherstaton fork)."""
 
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 
-__version__ = version("claude-swap")
+# This fork's distribution is ``claude-swap-cs``; fall back to the upstream name
+# for a pre-rename install, and to a placeholder so a bare source tree still
+# imports. A version lookup must never crash the import.
+try:
+    __version__ = version("claude-swap-cs")
+except PackageNotFoundError:
+    try:
+        __version__ = version("claude-swap")
+    except PackageNotFoundError:
+        __version__ = "0.0.0"
 
 from claude_swap.switcher import ClaudeAccountSwitcher
 

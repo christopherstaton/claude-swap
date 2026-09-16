@@ -2,18 +2,23 @@
 
 Multi-account switcher for Claude Code. Easily switch between multiple Claude accounts without logging out, or let it switch for you before you hit a rate limit. Track usage for every account in a live dashboard, and run accounts in parallel. Works with both the Claude Code CLI and the VS Code extension.
 
+> **This is the `christopherstaton` fork.** Its distribution is **`claude-swap-cs`** (adds the menu bar, native statusline + response badge, idle-headroom `harvest`, and a Claude Desktop MCP server). The `cswap` command and your `~/.claude-swap-backup` account data are unchanged from upstream. Install it from the Homebrew tap or Git — **not** PyPI, where `claude-swap` is the upstream package.
+
 ## Installation
 
-### Using uv (recommended)
+### Homebrew (recommended, macOS)
 
 ```bash
-uv tool install claude-swap
+brew install christopherstaton/homebrew-tap/claude-swap-cs
 ```
 
-### Using pipx
+### From Git (uv or pipx — macOS / Linux / Windows)
 
 ```bash
-pipx install claude-swap
+# pick the newest v0.27.0b1-forkN tag from
+# https://github.com/christopherstaton/claude-swap/tags
+uv tool install "git+https://github.com/christopherstaton/claude-swap.git@<tag>"
+# or: pipx install "git+https://github.com/christopherstaton/claude-swap.git@<tag>"
 ```
 
 ### From source
@@ -242,7 +247,7 @@ On Linux/WSL, set `XDG_DATA_HOME` to override the default location.
 Needs the `menubar` extra (macOS only):
 
 ```bash
-uv tool install 'claude-swap[menubar]'   # or: pipx install 'claude-swap[menubar]'
+uv tool install 'claude-swap-cs[menubar]'   # or: pipx install 'claude-swap-cs[menubar]'
 cswap menubar
 ```
 
@@ -350,9 +355,9 @@ Harvester: disarmed
 It needs the optional `mcp` package installed into cswap's environment:
 
 ```bash
-pip install 'claude-swap[mcp]'        # pip / uv installs
-pipx inject claude-swap mcp           # pipx installs
-# Homebrew:  "$(brew --prefix)/opt/claude-swap/libexec/bin/pip" install mcp
+pip install 'claude-swap-cs[mcp]'        # pip / uv installs
+pipx inject claude-swap-cs mcp           # pipx installs
+# Homebrew:  "$(brew --prefix)/opt/claude-swap-cs/libexec/bin/pip" install mcp
 ```
 
 Then register it in Claude Desktop's config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
