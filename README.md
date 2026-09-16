@@ -323,8 +323,13 @@ Unused 5h/weekly quota doesn't roll over. `cswap harvest` fills **idle** windows
 cswap harvest                       # status: config + whether it would run now, and why
 cswap harvest set --min-remaining 50 --start-hour 22 --end-hour 8 --max-runs 4
 cswap harvest add-task --name docs --cwd ~/VSCode/proj --prompt "update the CHANGELOG"
+cswap harvest add-task --name tests --cwd ~/VSCode/proj --command "make test"
 cswap harvest enable                # arm it
+cswap harvest run --dry-run         # evaluate the gate, show what it would run
+cswap harvest run                   # run one task now if the gate passes
 ```
+
+A task is either a `--prompt` (run headless via `claude -p`) or a `--command` (a shell command). `cswap harvest run` re-checks the whole gate at launch, holds a stale-expiring lock so overlapping ticks can't double-run, rotates through your tasks round-robin, caps runs per rolling 5h window, and kills a task that exceeds `--timeout-min`.
 
 The decision core is a strict safety gate — it **skips** unless: usage is fresh, remaining ≥ your `--min-remaining`, **no other Claude session is active** (an unreadable session record counts as busy), it's inside the allowed hours, the per-window run cap isn't hit, and the min interval has elapsed. `cswap harvest` (status) shows every input and the exact reason it would run or skip, so the logic is fully transparent:
 
@@ -336,7 +341,7 @@ Harvester: disarmed
   → would skip: no tasks queued
 ```
 
-> Task **execution** and the background launchd service are the next increment; today `cswap harvest` configures the policy and shows the live gate decision (read-only).
+> `cswap harvest run` executes a task now (behind the gate); a bundled **launchd** timer that ticks it automatically is the next increment — until then, point your own cron/launchd at `cswap harvest run`.
 
 ### Share your UI setup across machines (`cswap ui`)
 

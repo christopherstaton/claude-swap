@@ -1341,14 +1341,77 @@ def _harvest_gather(switcher, cfg):
     return remaining, fresh, profile, len(sessions), unreadable
 
 
+def _harvest_run(switcher, cfg, *, dry_run=False, gather=None, execute=None) -> dict:
+    """Evaluate the gate and run one queued task if it passes (round-robin).
+
+    Re-checks the full gate at launch time, holds a stale-expiring lock so
+    overlapping ticks can't double-run, caps runs per rolling window, and enforces
+    a per-run timeout. Returns a result dict (also printed). ``gather``/``execute``
+    are injectable seams for tests; nothing runs on a skip or ``dry_run``.
+    """
+    import time
+    from datetime import datetime
+
+    from claude_swap import harvest as hv
+
+    gather = gather or _harvest_gather
+    execute = execute or hv.execute_task
+    backup = switcher.backup_dir
+    now = time.time()
+
+    if not cfg.enabled and not dry_run:
+        print("Harvester is disarmed — run `cswap harvest enable` first.")
+        return {"ran": False, "reason": "disarmed"}
+
+    state = hv.load_state(backup)
+    if not hv.lock_is_stale(state, now):
+        print("A harvest task is already running.")
+        return {"ran": False, "reason": "already running"}
+
+    remaining, fresh, _profile, active, unreadable = gather(switcher, cfg)
+    runs, window_start = hv.next_window_state(state, now)
+    last_run = state.get("last_run_ts")
+    since = (now - last_run) if isinstance(last_run, (int, float)) else None
+    decision = hv.decide_idle_run(
+        remaining_pct=remaining, min_remaining=cfg.min_remaining,
+        active_sessions=active, session_scan_unreadable=unreadable,
+        tasks_available=bool(cfg.tasks), now=datetime.now(),
+        allow_start_hour=cfg.allow_start_hour, allow_end_hour=cfg.allow_end_hour,
+        seconds_since_last_run=since, min_interval_s=cfg.min_interval_min * 60,
+        runs_this_window=runs, max_runs_per_window=cfg.max_runs_per_window,
+        usage_fresh=fresh, already_running=False,   # lock already checked above
+    )
+    task, next_index = hv.pick_task(cfg.tasks, int(state.get("next_index", 0) or 0))
+
+    if not decision.run:
+        print(f"skip: {decision.reason}")
+        return {"ran": False, "reason": decision.reason}
+    if dry_run:
+        name = task.name if task else "(none)"
+        print(f"[dry-run] would run '{name}' — {decision.reason}")
+        return {"ran": False, "reason": "dry-run", "task": name}
+
+    hv.save_state(backup, {**state, "running": True, "running_since": now,
+                           "window_start_ts": window_start, "runs_this_window": runs,
+                           "next_index": next_index})
+    print(f"running '{task.name}' — {decision.reason}")
+    code = execute(task, cfg.per_run_timeout_min * 60)
+    hv.save_state(backup, {"running": False, "last_run_ts": time.time(),
+                           "runs_this_window": runs + 1, "window_start_ts": window_start,
+                           "next_index": next_index, "last_task": task.name,
+                           "last_result": code})
+    print(f"done '{task.name}' (exit {code}).")
+    return {"ran": True, "task": task.name, "exit_code": code}
+
+
 def _harvest_command(argv: list[str]) -> None:
     """Handle `cswap harvest` — run queued tasks during idle quota headroom.
 
     Unused 5h/weekly quota doesn't roll over; this fills idle windows with YOUR
-    tasks (headless `claude -p`) when there's headroom and no other session is
-    active, always capped. This subcommand configures and inspects the policy;
-    `status` (the default) shows whether it would run right now and why. Nothing
-    here executes a task. Pre-dispatched, so it must be the first argument.
+    tasks (headless `claude -p` or a shell command) when there's headroom and no
+    other session is active, always capped. `status` (the default) shows whether
+    it would run now and why; `run` evaluates the gate and runs one task if it
+    passes. Pre-dispatched, so it must be the first argument.
     """
     import time
     from dataclasses import replace
@@ -1370,8 +1433,10 @@ Examples:
         """,
     )
     sub = parser.add_subparsers(dest="action",
-                                metavar="{status,enable,disable,set,add-task,tasks,remove-task}")
+                                metavar="{status,run,enable,disable,set,add-task,tasks,remove-task}")
     sub.add_parser("status", help="Show config + whether it would run now (default)")
+    p_run = sub.add_parser("run", help="Evaluate the gate and run one task if it passes")
+    p_run.add_argument("--dry-run", action="store_true", help="Evaluate only; never execute")
     sub.add_parser("enable", help="Arm the harvester")
     sub.add_parser("disable", help="Disarm the harvester")
     p_set = sub.add_parser("set", help="Set policy parameters")
@@ -1381,11 +1446,14 @@ Examples:
     p_set.add_argument("--clear-hours", action="store_true", help="Allow any hour")
     p_set.add_argument("--min-interval-min", type=float, metavar="MIN")
     p_set.add_argument("--max-runs", type=int, metavar="N", help="Max runs per 5h window")
+    p_set.add_argument("--timeout-min", type=float, metavar="MIN", help="Per-run timeout")
     p_set.add_argument("--account", metavar="EMAIL", help="Harvest this account (default: active)")
-    p_add = sub.add_parser("add-task", help="Queue a task")
+    p_add = sub.add_parser("add-task", help="Queue a task (a --prompt or a --command)")
     p_add.add_argument("--name", required=True)
     p_add.add_argument("--cwd", required=True)
-    p_add.add_argument("--prompt", required=True)
+    p_add_what = p_add.add_mutually_exclusive_group(required=True)
+    p_add_what.add_argument("--prompt", help="Run headless via `claude -p`")
+    p_add_what.add_argument("--command", help="Run as a shell command")
     sub.add_parser("tasks", help="List queued tasks")
     p_rm = sub.add_parser("remove-task", help="Remove a queued task by name")
     p_rm.add_argument("name")
@@ -1406,6 +1474,9 @@ Examples:
         hv.save_config(backup, replace(cfg, enabled=False))
         print("Harvester disarmed.")
         return
+    if action == "run":
+        _harvest_run(switcher, cfg, dry_run=args.dry_run)
+        return
     if action == "set":
         updates = {}
         if args.min_remaining is not None:
@@ -1421,15 +1492,19 @@ Examples:
             updates["min_interval_min"] = args.min_interval_min
         if args.max_runs is not None:
             updates["max_runs_per_window"] = args.max_runs
+        if args.timeout_min is not None:
+            updates["per_run_timeout_min"] = args.timeout_min
         if args.account is not None:
             updates["account"] = args.account or None
         hv.save_config(backup, replace(cfg, **updates))
         print(f"Updated {', '.join(updates) or '(nothing)'}.")
         return
     if action == "add-task":
-        tasks = cfg.tasks + (hv.HarvestTask(name=args.name, prompt=args.prompt, cwd=args.cwd),)
-        hv.save_config(backup, replace(cfg, tasks=tasks))
-        print(f"Queued task '{args.name}' ({len(tasks)} total).")
+        task = hv.HarvestTask(name=args.name, cwd=args.cwd,
+                              prompt=args.prompt or "", command=args.command or "")
+        hv.save_config(backup, replace(cfg, tasks=cfg.tasks + (task,)))
+        kind = "command" if args.command else "prompt"
+        print(f"Queued task '{args.name}' ({kind}, {len(cfg.tasks) + 1} total).")
         return
     if action == "remove-task":
         tasks = tuple(t for t in cfg.tasks if t.name != args.name)
@@ -1444,7 +1519,8 @@ Examples:
             print("No tasks queued. Add one with `cswap harvest add-task`.")
             return
         for t in cfg.tasks:
-            print(f"  {t.name}: {t.prompt!r}  (in {t.cwd})")
+            what = f"$ {t.command}" if t.command else repr(t.prompt)
+            print(f"  {t.name}: {what}  (in {t.cwd})")
         return
 
     # default: status + live gate evaluation
