@@ -28,6 +28,11 @@ STATE_FILENAME = "harvest-state.json"
 # may already be higher, risking an overrun) — a stale reading means "skip".
 FRESH_MAX_S = 300.0
 
+# The per-window run cap resets on this rolling window (matches the 5h quota).
+WINDOW_S = 5 * 3600.0
+# A "running" lock older than this is treated as stale (the runner crashed).
+LOCK_TTL_S = 3 * 3600.0
+
 
 # --- decision core (pure) ------------------------------------------------------
 
@@ -111,11 +116,13 @@ def decide_idle_run(
 
 @dataclass(frozen=True)
 class HarvestTask:
-    """One queued task: a prompt run headless via ``claude -p`` in ``cwd``."""
+    """One queued task, run in ``cwd``. Either a ``prompt`` (executed headless via
+    ``claude -p``) or a ``command`` (executed as a shell command) — exactly one."""
 
     name: str
-    prompt: str
-    cwd: str
+    prompt: str = ""
+    cwd: str = ""
+    command: str = ""
 
 
 @dataclass(frozen=True)
@@ -128,6 +135,7 @@ class HarvestConfig:
     allow_end_hour: int | None = None
     min_interval_min: float = 30.0
     max_runs_per_window: int = 4
+    per_run_timeout_min: float = 30.0  # kill a task that runs longer than this
     account: str | None = None         # email to harvest on; None = active account
     tasks: tuple[HarvestTask, ...] = ()
 
@@ -146,7 +154,7 @@ def load_config(backup_root: Path) -> HarvestConfig:
         return HarvestConfig()
     tasks = tuple(
         HarvestTask(name=str(t.get("name", "")), prompt=str(t.get("prompt", "")),
-                    cwd=str(t.get("cwd", "")))
+                    cwd=str(t.get("cwd", "")), command=str(t.get("command", "")))
         for t in raw.get("tasks", []) if isinstance(t, dict)
     )
     defaults = HarvestConfig()
@@ -167,6 +175,7 @@ def load_config(backup_root: Path) -> HarvestConfig:
         if raw.get("allow_end_hour") is not None else None,
         min_interval_min=_get("min_interval_min", float, defaults.min_interval_min),
         max_runs_per_window=_get("max_runs_per_window", int, defaults.max_runs_per_window),
+        per_run_timeout_min=_get("per_run_timeout_min", float, defaults.per_run_timeout_min),
         account=raw.get("account") if isinstance(raw.get("account"), str) else None,
         tasks=tasks,
     )
@@ -181,8 +190,10 @@ def save_config(backup_root: Path, cfg: HarvestConfig) -> None:
         "allow_end_hour": cfg.allow_end_hour,
         "min_interval_min": cfg.min_interval_min,
         "max_runs_per_window": cfg.max_runs_per_window,
+        "per_run_timeout_min": cfg.per_run_timeout_min,
         "account": cfg.account,
-        "tasks": [{"name": t.name, "prompt": t.prompt, "cwd": t.cwd} for t in cfg.tasks],
+        "tasks": [{"name": t.name, "prompt": t.prompt, "cwd": t.cwd, "command": t.command}
+                  for t in cfg.tasks],
     }
     atomic_write_json(_config_path(backup_root), data)
 
@@ -197,3 +208,59 @@ def load_state(backup_root: Path) -> dict:
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def save_state(backup_root: Path, state: dict) -> None:
+    """Persist harvester run state atomically."""
+    atomic_write_json(backup_root / STATE_FILENAME, state)
+
+
+# --- execution helpers (pure where possible) -----------------------------------
+
+def task_argv(task: HarvestTask) -> list[str]:
+    """The argv to execute a task: a shell ``command`` as-is, else the ``prompt``
+    via headless ``claude -p``."""
+    if task.command:
+        return ["/bin/sh", "-c", task.command]
+    return ["claude", "-p", task.prompt]
+
+
+def next_window_state(state: dict, now: float, window_s: float = WINDOW_S) -> tuple[int, float]:
+    """The rolling run-cap counter: ``(runs_this_window, window_start)`` after
+    resetting once ``window_s`` has elapsed since the window started."""
+    start = state.get("window_start_ts")
+    runs = int(state.get("runs_this_window", 0) or 0)
+    if not isinstance(start, (int, float)) or now - start >= window_s:
+        return 0, now
+    return runs, float(start)
+
+
+def pick_task(tasks: tuple[HarvestTask, ...], index: int) -> tuple[HarvestTask | None, int]:
+    """Round-robin selection: the task at ``index`` and the next index to store."""
+    if not tasks:
+        return None, index
+    i = index % len(tasks)
+    return tasks[i], (i + 1) % len(tasks)
+
+
+def lock_is_stale(state: dict, now: float, ttl_s: float = LOCK_TTL_S) -> bool:
+    """Whether a ``running`` lock has aged out (the runner presumably crashed)."""
+    if not state.get("running"):
+        return True
+    since = state.get("running_since")
+    return not isinstance(since, (int, float)) or (now - since) >= ttl_s
+
+
+def execute_task(task: HarvestTask, timeout_s: float) -> int:
+    """Run a task's argv in its ``cwd`` with a hard timeout. Returns the exit code
+    (``-1`` on timeout, ``-2`` on a spawn error). Never raises."""
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            task_argv(task), cwd=task.cwd or None, timeout=timeout_s, check=False)
+        return proc.returncode
+    except subprocess.TimeoutExpired:
+        return -1
+    except (OSError, ValueError):
+        return -2

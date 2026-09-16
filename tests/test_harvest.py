@@ -255,3 +255,112 @@ def test_cli_status_busy_session_blocks(monkeypatch, capsys, tmp_path):
     _cli(monkeypatch, tmp_path, ["status"], accounts=[acc])
     out = capsys.readouterr().out
     assert "would skip" in out and "active" in out
+
+
+# --- executor: pure helpers ----------------------------------------------------
+
+def test_task_argv_prompt_vs_command():
+    assert hv.task_argv(hv.HarvestTask("t", prompt="do it", cwd="/r")) == ["claude", "-p", "do it"]
+    assert hv.task_argv(hv.HarvestTask("t", command="make test", cwd="/r")) == ["/bin/sh", "-c", "make test"]
+
+
+def test_next_window_state_resets_after_window():
+    assert hv.next_window_state({}, 1000.0) == (0, 1000.0)                    # first ever
+    assert hv.next_window_state({"runs_this_window": 2, "window_start_ts": 990.0}, 1000.0) == (2, 990.0)
+    assert hv.next_window_state({"runs_this_window": 2, "window_start_ts": 0.0}, 1000.0 + hv.WINDOW_S) == (0, 1000.0 + hv.WINDOW_S)
+
+
+def test_pick_task_round_robin():
+    tasks = (hv.HarvestTask("a", "p", "/r"), hv.HarvestTask("b", "p", "/r"))
+    assert hv.pick_task(tasks, 0) == (tasks[0], 1)
+    assert hv.pick_task(tasks, 1) == (tasks[1], 0)
+    assert hv.pick_task((), 0) == (None, 0)
+
+
+def test_lock_is_stale():
+    assert hv.lock_is_stale({}, 100.0) is True                               # no lock
+    assert hv.lock_is_stale({"running": True, "running_since": 100.0}, 150.0) is False  # fresh
+    assert hv.lock_is_stale({"running": True, "running_since": 0.0}, hv.LOCK_TTL_S + 1) is True  # aged out
+
+
+# --- executor: the runner (`cli._harvest_run`, injected seams) -----------------
+
+class _RunSwitcher:
+    def __init__(self, backup_dir):
+        self.backup_dir = backup_dir
+
+
+class _Exec:
+    def __init__(self, code=0):
+        self.calls = []
+        self.code = code
+
+    def __call__(self, task, timeout_s):
+        self.calls.append((task, timeout_s))
+        return self.code
+
+
+_OPEN = (90.0, True, "personal", 0, 0)     # remaining, fresh, profile, active, unreadable
+_BUSY = (90.0, True, "personal", 1, 0)
+
+
+def _run(tmp_path, cfg, gather_ret=_OPEN, code=0, dry_run=False):
+    ex = _Exec(code)
+    res = cli._harvest_run(_RunSwitcher(tmp_path), cfg, dry_run=dry_run,
+                           gather=lambda sw, c: gather_ret, execute=ex)
+    return res, ex
+
+
+def _task(name="t"):
+    return hv.HarvestTask(name, prompt="p", cwd="/r")
+
+
+def test_run_disarmed_never_executes(tmp_path):
+    res, ex = _run(tmp_path, hv.HarvestConfig(enabled=False, tasks=(_task(),)))
+    assert res["ran"] is False and ex.calls == []
+
+
+def test_run_skips_when_busy_no_execute(tmp_path):
+    cfg = hv.HarvestConfig(enabled=True, min_remaining=40, tasks=(_task(),))
+    res, ex = _run(tmp_path, cfg, gather_ret=_BUSY)
+    assert res["ran"] is False and ex.calls == []
+
+
+def test_run_dry_run_evaluates_without_executing(tmp_path):
+    cfg = hv.HarvestConfig(enabled=True, min_remaining=40, tasks=(_task(),))
+    res, ex = _run(tmp_path, cfg, dry_run=True)
+    assert res["reason"] == "dry-run" and res["task"] == "t" and ex.calls == []
+
+
+def test_run_executes_and_records_state(tmp_path):
+    cfg = hv.HarvestConfig(enabled=True, min_remaining=40, per_run_timeout_min=10,
+                           tasks=(_task(),))
+    res, ex = _run(tmp_path, cfg, code=0)
+    assert res == {"ran": True, "task": "t", "exit_code": 0}
+    assert ex.calls[0][0].name == "t" and ex.calls[0][1] == 600.0    # timeout seconds
+    st = hv.load_state(tmp_path)
+    assert st["runs_this_window"] == 1 and st["last_task"] == "t" and st["running"] is False
+
+
+def test_run_window_cap_blocks_execute(tmp_path):
+    import time
+    cfg = hv.HarvestConfig(enabled=True, min_remaining=40, max_runs_per_window=1, tasks=(_task(),))
+    hv.save_state(tmp_path, {"runs_this_window": 1, "window_start_ts": time.time()})
+    res, ex = _run(tmp_path, cfg)
+    assert res["ran"] is False and "cap" in res["reason"].lower() and ex.calls == []
+
+
+def test_run_lock_blocks_concurrent(tmp_path):
+    import time
+    cfg = hv.HarvestConfig(enabled=True, min_remaining=40, tasks=(_task(),))
+    hv.save_state(tmp_path, {"running": True, "running_since": time.time()})
+    res, ex = _run(tmp_path, cfg)
+    assert res["reason"] == "already running" and ex.calls == []
+
+
+def test_run_round_robin_advances(tmp_path):
+    cfg = hv.HarvestConfig(enabled=True, min_remaining=40, min_interval_min=0,
+                           tasks=(_task("a"), _task("b")))
+    r1, _ = _run(tmp_path, cfg)
+    r2, _ = _run(tmp_path, cfg)
+    assert r1["task"] == "a" and r2["task"] == "b"
