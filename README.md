@@ -315,6 +315,29 @@ cswap usage --hook              # preview the line the hook emits
 
 It installs two things: a **`UserPromptSubmit` hook** in `~/.claude/settings.json` that runs `cswap usage --hook` (store-only, never fetches, always exits `0`, so it can't slow or block a prompt), and a managed block in your global `~/.claude/CLAUDE.md` telling Claude to echo the badge. The hook injects one line — e.g. `cswap-usage » personal · 5h 31% left · 7d 59% left` — and Claude shows it as `personal · 31% 5h left`. The 5h figure prefers the fresh cross-window reading the statusline maintains, so it matches your other terminals. Start a new session after installing.
 
+### Use idle quota headroom (`cswap harvest`)
+
+Unused 5h/weekly quota doesn't roll over. `cswap harvest` fills **idle** windows with *your* queued tasks (headless `claude -p`) — but only when there's real headroom, nobody else is working, and always capped so it can't exhaust a window. It's **opt-in and disarmed by default.**
+
+```bash
+cswap harvest                       # status: config + whether it would run now, and why
+cswap harvest set --min-remaining 50 --start-hour 22 --end-hour 8 --max-runs 4
+cswap harvest add-task --name docs --cwd ~/VSCode/proj --prompt "update the CHANGELOG"
+cswap harvest enable                # arm it
+```
+
+The decision core is a strict safety gate — it **skips** unless: usage is fresh, remaining ≥ your `--min-remaining`, **no other Claude session is active** (an unreadable session record counts as busy), it's inside the allowed hours, the per-window run cap isn't hit, and the min interval has elapsed. `cswap harvest` (status) shows every input and the exact reason it would run or skip, so the logic is fully transparent:
+
+```
+Harvester: disarmed
+  5h remaining: 17%  (fresh)
+  policy:       run when ≥40% · hours any · ≤4/window · ≥30m apart
+  other sessions active: 3
+  → would skip: no tasks queued
+```
+
+> Task **execution** and the background launchd service are the next increment; today `cswap harvest` configures the policy and shows the live gate decision (read-only).
+
 ### Share your UI setup across machines (`cswap ui`)
 
 `cswap ui` saves the statusline + menu-bar **look** — global display prefs and, per account (by email), the custom label, brand color, auto-swap cap, and title override — into one portable JSON bundle. **No credentials are ever included.**
