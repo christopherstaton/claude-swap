@@ -1243,7 +1243,7 @@ Examples:
             uh.install(settings_path, claude_md)
             print(f"Installed the usage-badge hook in {settings_path}\n"
                   f"and the instruction in {claude_md}.\nStart a new Claude Code session — "
-                  "your usage %% will show at the start and end of each response.")
+                  "your usage % will show at the start and end of each response.")
         return
 
     if args.hook:
