@@ -140,6 +140,7 @@ def test_cli_idle_window_reflects_busy_windows_usage(monkeypatch, capsys, tmp_pa
     # at 46% used; the idle window's own payload froze earlier at 20%. The idle
     # window must show the busy window's *fresher* usage (54% left), not its own
     # stale 80% — this is the whole point of the cross-window record.
+    fut = time.time() + 100_000            # window still open (not expired)
     sw = _FakeSwitcher(tmp_path, active="1", has_live=True,
                        accounts=[_acct("1", "personal", "c@x.com", 37, active=True)])
     _seed_past_grace(tmp_path, "busy", "c@x.com")
@@ -147,12 +148,12 @@ def test_cli_idle_window_reflects_busy_windows_usage(monkeypatch, capsys, tmp_pa
 
     busy = _run(monkeypatch, capsys, sw,
                 {"session_id": "busy", "model": {"display_name": "Opus"},
-                 "rate_limits": {"five_hour": {"used_percentage": 46, "resets_at": 5000}}})
+                 "rate_limits": {"five_hour": {"used_percentage": 46, "resets_at": fut}}})
     assert busy == "personal 54% │ Opus"       # busy window pushes 46% used into the record
 
     idle = _run(monkeypatch, capsys, sw,
                 {"session_id": "idle", "model": {"display_name": "Opus"},
-                 "rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": 5000}}})
+                 "rate_limits": {"five_hour": {"used_percentage": 20, "resets_at": fut}}})
     assert idle == "personal 54% │ Opus"       # idle reflects 46%, not its frozen 20%
 
 

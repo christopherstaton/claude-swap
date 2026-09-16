@@ -193,6 +193,15 @@ def test_merge_live_usage_ignores_older_window_reading():
     assert rec == prev
 
 
+def test_merge_live_usage_expired_stored_window_drops_peak():
+    # The stored window's resets_at has passed (a 5h reset) → the old ~100% peak
+    # must not survive via the monotonic max even if the payload's resets_at hasn't
+    # advanced yet (the badge "0% left right after a reset" bug).
+    prev = {"five_hour_used": 100.0, "resets_at": 5000.0, "updated_at": 4000.0}
+    rec = sl.merge_live_usage(prev, five_hour_used=8.0, resets_at=5000.0, now=5001.0)
+    assert rec["five_hour_used"] == 8.0     # not max(100, 8)
+
+
 def test_merge_live_usage_none_payload_keeps_prev():
     prev = {"five_hour_used": 62.0, "resets_at": 5000.0, "updated_at": 200.0}
     assert sl.merge_live_usage(prev, five_hour_used=None, resets_at=None, now=400.0) == prev
