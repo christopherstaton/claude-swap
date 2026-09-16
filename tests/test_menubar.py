@@ -129,11 +129,11 @@ def test_tightest_pct_none_for_non_dict_or_empty():
 
 
 def test_usage_summary_dict():
-    assert menubar.usage_summary(_USAGE) == "5h 42% · 7d 18% · $ 30%"
+    assert menubar.usage_summary(_USAGE) == "5h 58% · 7d 82% · $ 30%"
 
 
 def test_usage_summary_partial_windows():
-    assert menubar.usage_summary({"five_hour": {"pct": 5.0}}) == "5h 5%"
+    assert menubar.usage_summary({"five_hour": {"pct": 5.0}}) == "5h 95%"
 
 
 def test_usage_summary_includes_scoped_model_limits():
@@ -145,12 +145,12 @@ def test_usage_summary_includes_scoped_model_limits():
         "scoped": [{"name": "Fable", "pct": 4.0}],
         "spend": {"pct": 30.0},
     }
-    assert menubar.usage_summary(usage) == "5h 82% · 7d 12% · Fable 4% · $ 30%"
+    assert menubar.usage_summary(usage) == "5h 18% · 7d 88% · Fable 96% · $ 30%"
 
 
 def test_usage_summary_scoped_over_limit_marker():
     usage = {"scoped": [{"name": "Fable", "pct": 100.0}]}
-    assert menubar.usage_summary(usage) == "Fable 100% (!)"
+    assert menubar.usage_summary(usage) == "Fable 0% (!)"
 
 
 def test_usage_summary_scoped_multiple_and_countdown():
@@ -160,7 +160,7 @@ def test_usage_summary_scoped_multiple_and_countdown():
             {"name": "Opus", "pct": 55.0},
         ],
     }
-    assert menubar.usage_summary(usage, _NOW) == "Fable 4% (2h 0m) · Opus 55%"
+    assert menubar.usage_summary(usage, _NOW) == "Fable 96% (2h 0m) · Opus 45%"
 
 
 def test_usage_summary_string_sentinel_passthrough():
@@ -213,14 +213,14 @@ def test_usage_summary_no_pace_marker_on_window_rolled_to_zero():
     usage = {"seven_day": {"pct": 95.0, "resets_at": _iso(-3 * 86400)}}
     out = menubar.usage_summary(usage, _NOW, fetched_at=_NOW - 4 * 86400)
     assert "ahead" not in out
-    assert "7d 0%" in out
+    assert "7d 100%" in out
 
 
 def test_usage_summary_scoped_no_pace_marker_on_window_rolled_to_zero():
     usage = {"scoped": [{"name": "Fable", "pct": 95.0, "resets_at": _iso(-3 * 86400)}]}
     out = menubar.usage_summary(usage, _NOW, fetched_at=_NOW - 4 * 86400)
     assert "ahead" not in out
-    assert "Fable 0%" in out
+    assert "Fable 100%" in out
 
 
 # --- battery-drain gauge --------------------------------------------------------
@@ -246,16 +246,16 @@ def test_format_gauge_custom_cell_count():
 def test_format_account_header_gauge_and_session():
     # Header is concise: name, battery gauge for the binding window, 5h summary.
     header = menubar.format_account_header(2, "loc@papaya.asia", _USAGE)
-    assert header == "2  loc@papaya.asia  ▰▰▰▱▱  5h 42%"
+    assert header == "2  loc@papaya.asia  ▰▰▰▱▱  5h 58%"
 
 
 def test_format_account_header_alias_active_disabled_markers():
     assert menubar.format_account_header(
         2, "loc@papaya.asia", _USAGE, alias="dev", is_active=True
-    ) == "● 2  dev  (loc@papaya.asia)  ▰▰▰▱▱  5h 42%"
+    ) == "● 2  dev  (loc@papaya.asia)  ▰▰▰▱▱  5h 58%"
     assert menubar.format_account_header(
         2, "loc@papaya.asia", _USAGE, disabled=True
-    ) == "2  loc@papaya.asia  (disabled)  ▰▰▰▱▱  5h 42%"
+    ) == "2  loc@papaya.asia  (disabled)  ▰▰▰▱▱  5h 58%"
 
 
 def test_format_account_header_no_gauge_when_usage_unknown():
@@ -267,7 +267,7 @@ def test_format_account_header_no_gauge_when_usage_unknown():
 
 def test_format_account_header_gauge_can_be_disabled():
     header = menubar.format_account_header(2, "loc@papaya.asia", _USAGE, show_gauge=False)
-    assert header == "2  loc@papaya.asia  5h 42%"
+    assert header == "2  loc@papaya.asia  5h 58%"
 
 
 # --- usage logging -------------------------------------------------------------
@@ -431,13 +431,13 @@ def test_usage_summary_live_countdown_from_resets_at():
         "seven_day": {"pct": 18.0, "resets_at": _iso(86400 + 19 * 3600)},
         "spend": {"pct": 30.0},
     }
-    assert menubar.usage_summary(usage, _NOW) == "5h 42% (2h 33m) · 7d 18% (1d 19h) · $ 30%"
+    assert menubar.usage_summary(usage, _NOW) == "5h 58% (2h 33m) · 7d 82% (1d 19h) · $ 30%"
 
 
 def test_usage_summary_omits_countdown_when_passed_or_missing():
     # 5h reset already passed (stale data) -> omit; 7d has no resets_at -> omit
     usage = {"five_hour": {"pct": 53.0, "resets_at": _iso(-60)}, "seven_day": {"pct": 8.0}}
-    assert menubar.usage_summary(usage, _NOW) == "5h 53% · 7d 8%"
+    assert menubar.usage_summary(usage, _NOW) == "5h 47% · 7d 92%"
 
 
 # --- switch-history log parsing ------------------------------------------------
@@ -559,13 +559,13 @@ def test_usage_summary_reflects_passed_weekly_reset():
         "five_hour": {"pct": 10.0},
         "seven_day": {"pct": 95.0, "resets_at": _iso(-86400)},
     }
-    assert menubar.usage_summary(usage, _NOW) == "5h 10% · 7d 0% (6d 0h)"
+    assert menubar.usage_summary(usage, _NOW) == "5h 90% · 7d 100% (6d 0h)"
 
 
 def test_usage_summary_scoped_reflects_passed_weekly_reset():
     usage = {"scoped": [{"name": "Fable", "pct": 100.0, "resets_at": _iso(-86400)}]}
     # rolled to 0% → the over-limit "(!)" marker is gone too
-    assert menubar.usage_summary(usage, _NOW) == "Fable 0% (6d 0h)"
+    assert menubar.usage_summary(usage, _NOW) == "Fable 100% (6d 0h)"
 
 
 def test_format_title_reflects_passed_weekly_reset():
@@ -602,10 +602,10 @@ def test_account_detail_lines_full():
     lines = menubar.account_detail_lines(2, "a@x.com", usage, now=_NOW)
     assert lines[0] == "Email: a@x.com"
     assert lines[1] == "Account: #2"
-    assert lines[2] == "Session (5h): 42% · resets in 2h 0m"
+    assert lines[2] == "Session (5h): 58% · resets in 2h 0m"
     assert lines[3] == "   Session started 3h 0m ago · resets in 2h 0m (06:59)"
-    assert lines[4] == "Weekly (7d): 18% · resets in 2d 0h"
-    assert lines[5] == "Fable: 100% (maxed) · resets in 3d 0h"
+    assert lines[4] == "Weekly (7d): 82% · resets in 2d 0h"
+    assert lines[5] == "Fable: 0% (maxed) · resets in 3d 0h"
     assert lines[6] == "Overage: $3.00 / $10.00"
 
 

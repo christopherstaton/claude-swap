@@ -302,7 +302,7 @@ def usage_summary(
             # pct with this cycle's freshly-reset 0% display.
             pace_result = pace.compute_pace(window, fetched_at=fetched_at)
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
-            seg = f"{label} {window['pct']:.0f}%"
+            seg = f"{label} {_remaining_pct(window['pct']):.0f}%"
             if key == "seven_day" and pace_result and pace_result.ahead:
                 seg += " (ahead)"
             countdown = _live_countdown(window, now)
@@ -314,7 +314,7 @@ def usage_summary(
         window = _rolled_weekly_window(window, now)  # weekly cadence, same roll-forward
         pace_result = pace.compute_pace(window, fetched_at=fetched_at)  # against the rolled window, see above
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
-            seg = f"{window['name']} {window['pct']:.0f}%"
+            seg = f"{window['name']} {_remaining_pct(window['pct']):.0f}%"
             if window["pct"] >= 100:
                 seg += " (!)"  # maxed model — the usual reason to switch
             elif pace_result and pace_result.ahead:
@@ -344,7 +344,7 @@ def _session_summary(usage: dict | str | None, now: float) -> str:
         if key == "seven_day":
             window = _rolled_weekly_window(window, now)
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)):
-            seg = f"{label} {window['pct']:.0f}%"
+            seg = f"{label} {_remaining_pct(window['pct']):.0f}%"
             countdown = _live_countdown(window, now)
             if countdown:
                 seg += f" ({countdown})"
@@ -434,7 +434,7 @@ def account_detail_lines(
 
     five = usage.get("five_hour")
     if isinstance(five, dict) and isinstance(five.get("pct"), (int, float)):
-        seg = f"Session (5h): {five['pct']:.0f}%"
+        seg = f"Session (5h): {_remaining_pct(five['pct']):.0f}%"
         countdown = _live_countdown(five, now)
         if countdown:
             seg += f" · resets in {countdown}"
@@ -446,7 +446,7 @@ def account_detail_lines(
     seven = _rolled_weekly_window(usage.get("seven_day"), now)
     if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)):
         pace_result = pace.compute_pace(seven, fetched_at=fetched_at)
-        seg = f"Weekly (7d): {seven['pct']:.0f}%"
+        seg = f"Weekly (7d): {_remaining_pct(seven['pct']):.0f}%"
         if pace_result and pace_result.ahead:
             seg += " (ahead)"
         countdown = _live_countdown(seven, now)
@@ -457,7 +457,7 @@ def account_detail_lines(
     for window in usage.get("scoped") or []:
         window = _rolled_weekly_window(window, now)
         if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
-            seg = f"{window['name']}: {window['pct']:.0f}%"
+            seg = f"{window['name']}: {_remaining_pct(window['pct']):.0f}%"
             if window["pct"] >= 100:
                 seg += " (maxed)"
             countdown = _live_countdown(window, now)

@@ -121,6 +121,18 @@ def _pace_marker(window: dict, fetched_at: float | None) -> str:
     return "  (ahead of pace)" if result and result.ahead else ""
 
 
+def _remaining_pct(used: float) -> float:
+    """Remaining quota % (100 − used), clamped to [0, 100].
+
+    Every usage view drains 100→0 for consistency (statusline, menu-bar title,
+    the `cswap usage` badge, and these list/status rows), so a fresh window reads
+    ~100% and falls as quota is consumed. Matches ``statusline.remaining_from_used``
+    and ``menubar._remaining_pct``. Utilization stays in *used* terms internally
+    (pace, auto-switch, `--json`).
+    """
+    return max(0.0, min(100.0, 100.0 - float(used)))
+
+
 def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[str]:
     # Collect (label, body) rows first, then pad every label to the widest one so
     # per-model names (e.g. "Fable") don't shift the columns of the other lines.
@@ -142,9 +154,9 @@ def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[st
             cell = oauth.fresh_reset_strings(w)
             if cell:
                 countdown, clock = cell
-                rows.append((label, f"{w['pct']:>3.0f}%   resets {clock:<12}  in {countdown}{marker}"))
+                rows.append((label, f"{_remaining_pct(w['pct']):>3.0f}%   resets {clock:<12}  in {countdown}{marker}"))
             else:
-                rows.append((label, f"{w['pct']:>3.0f}%{marker}"))
+                rows.append((label, f"{_remaining_pct(w['pct']):>3.0f}%{marker}"))
     for w in usage.get("scoped") or []:
         # Per-model weekly limits (e.g. Fable). Flag ones at/over the limit so a
         # maxed model — the usual reason to switch — stands out.
@@ -152,9 +164,9 @@ def _format_usage_lines(usage: dict, fetched_at: float | None = None) -> list[st
         cell = oauth.fresh_reset_strings(w)
         if cell:
             countdown, clock = cell
-            rows.append((w["name"], f"{w['pct']:>3.0f}%   resets {clock:<12}  in {countdown}{marker}"))
+            rows.append((w["name"], f"{_remaining_pct(w['pct']):>3.0f}%   resets {clock:<12}  in {countdown}{marker}"))
         else:
-            rows.append((w["name"], f"{w['pct']:>3.0f}%{marker}"))
+            rows.append((w["name"], f"{_remaining_pct(w['pct']):>3.0f}%{marker}"))
     width = max((len(label) for label, _ in rows), default=0) + 1  # label + ':'
     return [f"{label + ':':<{width}} {body}" for label, body in rows]
 

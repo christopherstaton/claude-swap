@@ -661,8 +661,8 @@ class TestStatusCache:
 
         mock_fetch.assert_not_called()
         output = capsys.readouterr().out
-        assert "25%" in output
-        assert "60%" in output
+        assert "75%" in output
+        assert "40%" in output
 
     def test_status_fetches_with_is_active_true_when_cc_running(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
@@ -690,7 +690,7 @@ class TestStatusCache:
         assert mock_fetch.call_args.kwargs.get("is_active") is True
 
         output = capsys.readouterr().out
-        assert "10%" in output
+        assert "90%" in output
 
         entry = UsageStore(switcher.backup_dir / "cache").entries(
             {"1": ("test@example.com", "")}
@@ -1124,7 +1124,7 @@ class TestListAccountsUsage:
         assert "account2@example.com" in output
         assert "├ 5h:" in output
         assert "└ 7d:" in output
-        assert "10%" in output
+        assert "90%" in output
         assert "50%" in output
 
     def test_list_shows_alias_before_email(
@@ -1180,8 +1180,8 @@ class TestListAccountsUsage:
             switcher.list_accounts()
 
         output = capsys.readouterr().out
-        assert "5h:   0%" in output
-        assert "7d: 100%" in output
+        assert "5h: 100%" in output
+        assert "7d:   0%" in output
         assert "usage unavailable" not in output
 
     def test_list_no_credentials(
@@ -1417,8 +1417,8 @@ class TestListAccountsUsage:
         # API should NOT have been called — data came from the store
         mock_fetch.assert_not_called()
         output = capsys.readouterr().out
-        assert "25%" in output
-        assert "80%" in output
+        assert "75%" in output
+        assert "20%" in output
 
     def test_list_refetches_stale_entries(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
@@ -1459,8 +1459,8 @@ class TestListAccountsUsage:
         assert mock_fetch.call_count == 2
         output = capsys.readouterr().out
         # Should show live data (10%), not the stale 25%
-        assert "10%" in output
-        assert "25%" not in output
+        assert "90%" in output
+        assert "75%" not in output
 
     def test_on_demand_pass_persists_poll_plans(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
@@ -1534,7 +1534,7 @@ class TestListAccountsUsage:
         # Only account "2" (no stored row, no plan) was fetch-eligible.
         assert mock_fetch.call_count == 1
         output = capsys.readouterr().out
-        assert "25%" in output  # account 1 served from the store
+        assert "75%" in output  # account 1 served from the store
 
     def test_on_demand_pass_repairs_reset_parked_exhausted_plan(
         self, temp_home: Path, mock_claude_config: Path, sample_sequence_data: dict, capsys
@@ -1581,7 +1581,7 @@ class TestListAccountsUsage:
 
         assert mock_fetch.call_count == 2  # repaired account 1 plus empty account 2
         output = capsys.readouterr().out
-        assert "10%" in output
+        assert "90%" in output
         entry = switcher._usage_store.entries(ident1)["1"]
         assert entry.next_poll_at is not None
         assert entry.next_poll_at < time_mod.time() + 86_400.0
@@ -6420,7 +6420,7 @@ class TestFormatUsageLines:
         assert lines[1].startswith("7d:")
         fable = lines[2]
         assert fable.startswith("Fable:")
-        assert "100%" in fable
+        assert "0%" in fable
         assert fable.rstrip().endswith("(!)")  # at/over limit marker
 
     def test_scoped_under_limit_has_no_marker(self):
@@ -6428,7 +6428,7 @@ class TestFormatUsageLines:
         lines = _format_usage_lines(usage)
         assert len(lines) == 1
         assert lines[0].startswith("Fable:")
-        assert "40%" in lines[0]
+        assert "60%" in lines[0]
         assert "resets 21:59" in lines[0]
         assert "in 3h" in lines[0]
         assert not lines[0].rstrip().endswith("(!)")
@@ -6436,7 +6436,7 @@ class TestFormatUsageLines:
     def test_scoped_without_clock_renders_pct_only(self):
         usage = {"scoped": [{"name": "Fable", "pct": 100.0}]}
         lines = _format_usage_lines(usage)
-        assert lines == ["Fable: 100%  (!)"]
+        assert lines == ["Fable:   0%  (!)"]
 
     def test_countdown_recomputed_from_resets_at_not_cached_strings(self):
         # A measurement served from the store hours after its fetch still
@@ -6514,15 +6514,15 @@ class TestFormatUsageLines:
         }
         lines = _format_usage_lines(usage)
         # Labels are padded to the widest ("Fable:"), so the % column lines up.
-        assert lines[0] == "5h:      0%"
-        assert lines[1].startswith("7d:     62%   resets Jul 5 08:59")
-        assert lines[2].startswith("Fable: 100%   resets Jul 5 08:59")
+        assert lines[0] == "5h:    100%"
+        assert lines[1].startswith("7d:     38%   resets Jul 5 08:59")
+        assert lines[2].startswith("Fable:   0%   resets Jul 5 08:59")
         assert len({line.index("%") for line in lines}) == 1
 
     def test_standard_windows_alone_keep_legacy_layout(self):
         usage = {"five_hour": {"pct": 7.0, "clock": "20:39", "countdown": "1h 30m"}}
         lines = _format_usage_lines(usage)
-        assert lines == ["5h:   7%   resets 20:39         in 1h 30m"]
+        assert lines == ["5h:  93%   resets 20:39         in 1h 30m"]
 
     def test_seven_day_ahead_of_pace_marker(self):
         # 1 day elapsed of the week (resets_at 6 days out), 50% used -> far
