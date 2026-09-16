@@ -229,7 +229,9 @@ def test_cli_install_then_uninstall_hook_command(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(uh, "default_claude_md_path", lambda: claude_md)
 
     cli._usage_command(["--install-hook"])
-    assert "Installed the usage-badge hook" in capsys.readouterr().out
+    msg = capsys.readouterr().out
+    assert "Installed the usage-badge hook" in msg
+    assert "%%" not in msg and "usage % will show" in msg   # no stray argparse escape
     data = json.loads(settings.read_text(encoding="utf-8"))
     cmds = [h["command"] for g in data["hooks"]["UserPromptSubmit"] for h in g["hooks"]]
     assert uh.HOOK_COMMAND in cmds
