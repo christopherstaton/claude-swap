@@ -195,16 +195,48 @@ def test_cli_hook_prints_active_badge(monkeypatch, capsys, tmp_path):
 
 
 def test_cli_hook_prefers_fresh_cross_window_5h(monkeypatch, capsys, tmp_path):
-    # The statusline wrote a fresher (higher-used) 5h reading into the live file;
-    # the badge must reflect it, not the staler store lastGood.
+    # The statusline wrote a fresher (higher-used) 5h reading into the live file
+    # (its window still open); the badge must reflect it, not the staler store.
+    import time
+    future = time.time() + 9999
     (tmp_path / "cache").mkdir()
     sl.write_live_usage(sl.live_usage_path(tmp_path / "cache"),
-                        {"c@x.com": {"five_hour_used": 80.0, "resets_at": 1.0, "updated_at": 1.0}})
+                        {"c@x.com": {"five_hour_used": 80.0, "resets_at": future, "updated_at": future}})
     lg = {"five_hour": {"pct": 37}, "seven_day": {"pct": 41}}
     sw = _Switcher(tmp_path, "1", [_Acct("1", "c@x.com", "personal", lg)])
     monkeypatch.setattr(cli, "ClaudeAccountSwitcher", lambda **k: sw)
     cli._usage_hook_line()
     assert "5h 20% left" in capsys.readouterr().out    # 80% used → 20% left (live), not 63
+
+
+def test_cli_hook_ignores_expired_5h_window_shows_unknown(monkeypatch, capsys, tmp_path):
+    # Store 5h window has already reset (resets_at in the past) → the badge must not
+    # show that finished window's 100%-used as "0% left"; it shows "?" instead.
+    import time
+    now = time.time()
+    lg = {"five_hour": {"pct": 100, "resets_at": now - 10},
+          "seven_day": {"pct": 41, "resets_at": now + 99999}}
+    sw = _Switcher(tmp_path, "1", [_Acct("1", "c@x.com", "personal", lg)])
+    monkeypatch.setattr(cli, "ClaudeAccountSwitcher", lambda **k: sw)
+    cli._usage_hook_line()
+    out = capsys.readouterr().out
+    assert "5h ? left" in out and "0% left" not in out
+    assert "7d 59% left" in out          # 7d still open → 41% used → 59% left
+
+
+def test_cli_hook_expired_live_file_falls_back_to_fresh_store(monkeypatch, capsys, tmp_path):
+    # The live file holds a stale peak from a finished window; the store is fresh —
+    # the badge shows the store's value, not the expired live peak.
+    import time
+    now = time.time()
+    (tmp_path / "cache").mkdir()
+    sl.write_live_usage(sl.live_usage_path(tmp_path / "cache"),
+                        {"c@x.com": {"five_hour_used": 100.0, "resets_at": now - 5, "updated_at": now - 5}})
+    lg = {"five_hour": {"pct": 20, "resets_at": now + 9999}}   # fresh store reading
+    sw = _Switcher(tmp_path, "1", [_Acct("1", "c@x.com", "personal", lg)])
+    monkeypatch.setattr(cli, "ClaudeAccountSwitcher", lambda **k: sw)
+    cli._usage_hook_line()
+    assert "5h 80% left" in capsys.readouterr().out   # store's fresh 80%, not the stale peak
 
 
 def test_cli_hook_no_active_prints_nothing(monkeypatch, capsys, tmp_path):

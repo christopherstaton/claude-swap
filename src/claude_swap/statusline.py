@@ -341,6 +341,11 @@ def merge_live_usage(
         return {"five_hour_used": five_hour_used, "resets_at": resets_at, "updated_at": now}
 
     prev_reset = prev.get("resets_at")
+    # If the stored window has already ended, its usage is from a finished window —
+    # don't let the monotonic max carry that peak into the new window (the badge's
+    # "0% left just after a 5h reset" bug).
+    if isinstance(prev_reset, (int, float)) and now >= prev_reset:
+        return {"five_hour_used": five_hour_used, "resets_at": resets_at, "updated_at": now}
     if isinstance(resets_at, (int, float)) and isinstance(prev_reset, (int, float)):
         if resets_at > prev_reset:  # window rolled over → take the new reading
             return {"five_hour_used": five_hour_used, "resets_at": resets_at, "updated_at": now}

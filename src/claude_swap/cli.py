@@ -1160,10 +1160,13 @@ def _usage_hook_line() -> None:
     must never block, slow, or fail the prompt. Prefers the cross-window live 5h
     reading (kept fresh by the statusline) so the badge matches every window.
     """
+    import time
+
     from claude_swap import statusline as sl
     from claude_swap import usage_hook as uh
 
     line = ""
+    now = time.time()
     try:
         switcher = ClaudeAccountSwitcher(debug=False)
         active = switcher.current_account_number()
@@ -1177,15 +1180,21 @@ def _usage_hook_line() -> None:
                 def _left(window: str) -> float | None:
                     w = lg.get(window) if isinstance(lg, dict) else None
                     if isinstance(w, dict) and isinstance(w.get("pct"), (int, float)):
+                        r = w.get("resets_at")
+                        if isinstance(r, (int, float)) and r <= now:
+                            return None  # window already reset — this reading is stale
                         return sl.remaining_from_used(float(w["pct"]))
                     return None
 
                 five_left, seven_left = _left("five_hour"), _left("seven_day")
-                try:  # prefer the fresher cross-window 5h reading when present
+                try:  # prefer the cross-window 5h reading, unless its window has reset
                     rec = sl.read_live_usage(
                         sl.live_usage_path(switcher.backup_dir / "cache")).get(acc.email)
                     if isinstance(rec, dict) and rec.get("five_hour_used") is not None:
-                        five_left = sl.remaining_from_used(float(rec["five_hour_used"]))
+                        r = rec.get("resets_at")
+                        if not isinstance(r, (int, float)) or r > now:
+                            five_left = sl.remaining_from_used(float(rec["five_hour_used"]))
+                        # else: expired live reading — keep the store-derived value
                 except Exception:
                     pass
                 line = uh.hook_line(profile, five_left, seven_left)
