@@ -75,7 +75,7 @@ def decide_idle_run(
     """Decide whether to launch a queued task now. Skip is always the safe default.
 
     Gates, in order (first failure wins its reason):
-    already-running · no-tasks · stale-usage · unknown-usage · unreadable-sessions
+    already-running · no-tasks · unknown-usage · stale-usage · unreadable-sessions
     (fail-safe busy) · another-session-active · outside-hours · insufficient-headroom
     · window-cap · min-interval. Only a clean pass runs.
     """
@@ -83,10 +83,10 @@ def decide_idle_run(
         return HarvestDecision(False, "a harvest task is already running")
     if not tasks_available:
         return HarvestDecision(False, "no tasks queued")
-    if not usage_fresh:
-        return HarvestDecision(False, "usage reading is stale — refusing to act on it")
     if remaining_pct is None:
         return HarvestDecision(False, "usage unknown")
+    if not usage_fresh:
+        return HarvestDecision(False, "usage reading is stale — refusing to act on it")
     if session_scan_unreadable > 0:
         return HarvestDecision(
             False, "could not read every session record — assuming busy")

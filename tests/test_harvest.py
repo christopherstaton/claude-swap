@@ -66,6 +66,12 @@ def test_skip_when_remaining_unknown():
     assert _decide(remaining_pct=None).run is False
 
 
+def test_unknown_usage_reported_as_unknown_not_stale():
+    # No data at all reads as "unknown", not "stale" (self-review fix).
+    d = _decide(remaining_pct=None, usage_fresh=False)
+    assert d.run is False and "unknown" in d.reason.lower()
+
+
 def test_skip_when_sessions_unreadable_fail_safe_busy():
     # can't read every session record → assume busy, never run underneath one
     d = _decide(session_scan_unreadable=1)
