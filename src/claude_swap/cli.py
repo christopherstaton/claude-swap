@@ -1413,6 +1413,102 @@ def _harvest_run(switcher, cfg, *, dry_run=False, gather=None, execute=None) -> 
     return {"ran": True, "task": task.name, "exit_code": code}
 
 
+def _doctor_command(argv: list[str]) -> None:
+    """Handle `cswap doctor` — a read-only health check of the cswap setup.
+
+    Checks accounts, usage-store freshness, the statusline, the response badge,
+    the menu-bar service, the harvester, the MCP dependency, and duplicate/orphaned
+    Keychain entries (the pre-fork "multiple entries" issue). No network, no writes.
+    Pre-dispatched, so it must be the first argument.
+    """
+    import importlib.util
+    import json as _json
+
+    from claude_swap import __version__ as _ver
+    from claude_swap import doctor as dr
+    from claude_swap import harvest as hv
+    from claude_swap import statusline as sl
+    from claude_swap import usage_hook as uh
+
+    try:
+        import importlib.metadata as _md
+        _md.distribution("claude-swap-cs")
+        distribution = "claude-swap-cs"
+    except Exception:
+        distribution = "claude-swap"
+
+    switcher = ClaudeAccountSwitcher(debug=False)
+    backup = switcher.backup_dir
+
+    account_count, active_profile, error_accounts, store_age_s = 0, None, 0, None
+    try:
+        accts = switcher.accounts_snapshot(fetch=set()).accounts
+        account_count = len(accts)
+        active = next((a for a in accts if getattr(a, "is_active", False)), None)
+        if active is not None:
+            active_profile = active.alias or active.email.split("@", 1)[0].lower()
+        error_accounts = sum(1 for a in accts if getattr(a.usage, "sentinel", None))
+        ages = [a.usage.age_s for a in accts if getattr(a.usage, "age_s", None) is not None]
+        store_age_s = min(ages) if ages else None
+    except Exception:
+        pass
+
+    try:
+        settings = _json.loads(sl.default_settings_path().read_text(encoding="utf-8"))
+    except Exception:
+        settings = {}
+    statusline_installed = isinstance(settings, dict) and "statusLine" in settings
+    hook_cmds = [h.get("command")
+                 for g in (settings.get("hooks", {}) or {}).get("UserPromptSubmit", []) or []
+                 if isinstance(g, dict)
+                 for h in (g.get("hooks") or []) if isinstance(h, dict)]
+    badge_installed = uh.HOOK_COMMAND in hook_cmds
+
+    cfg = hv.load_config(backup)
+    mcp_available = importlib.util.find_spec("mcp") is not None
+    is_macos = sys.platform == "darwin"
+
+    menubar_installed = menubar_loaded = False
+    login_kc = backup_kc = None
+    if is_macos:
+        try:
+            from claude_swap import launch_agent as la
+            st = la.status()
+            menubar_installed, menubar_loaded = bool(st.get("installed")), bool(st.get("loaded"))
+        except Exception:
+            pass
+        try:
+            from claude_swap import macos_keychain as kc
+            login_kc = kc.count_service_items("Claude Code-credentials")
+            backup_kc = kc.count_service_items("claude-swap")
+        except Exception:
+            pass
+
+    checks = dr.build_report(
+        distribution=distribution, version=_ver, account_count=account_count,
+        active_profile=active_profile, error_accounts=error_accounts,
+        store_age_s=store_age_s, statusline_installed=statusline_installed,
+        badge_installed=badge_installed, harvest_enabled=cfg.enabled,
+        harvest_tasks=len(cfg.tasks), mcp_available=mcp_available, is_macos=is_macos,
+        menubar_service_installed=menubar_installed, menubar_service_loaded=menubar_loaded,
+        claude_login_keychain_count=login_kc, cswap_backup_keychain_count=backup_kc,
+    )
+
+    if argv and argv[0] == "--json":
+        print(_json.dumps([{"name": c.name, "status": c.status, "detail": c.detail,
+                            "hint": c.hint} for c in checks], indent=2))
+        return
+
+    print("cswap doctor\n")
+    for c in checks:
+        print(f"  {c.glyph}  {c.name:<16} {c.detail}")
+        if c.hint and c.status != "ok":
+            print(f"       → {c.hint}")
+    warn, err = dr.summarize(checks)
+    print("\n" + ("All good." if not (warn or err)
+                  else f"{warn} warning(s)" + (f", {err} error(s)" if err else "") + "."))
+
+
 def _mcp_command(argv: list[str]) -> None:
     """Handle `cswap mcp` — run the MCP server for Claude Desktop over stdio.
 
@@ -1808,6 +1904,9 @@ def main() -> None:
         return
     if argv and argv[0] == "mcp":
         _mcp_command(argv[1:])
+        return
+    if argv and argv[0] == "doctor":
+        _doctor_command(argv[1:])
         return
     if argv and argv[0] == "map":
         _map_command(argv[1:])

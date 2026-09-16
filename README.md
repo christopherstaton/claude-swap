@@ -372,6 +372,23 @@ Then register it in Claude Desktop's config (`~/Library/Application Support/Clau
 
 Restart Claude Desktop and ask *"what's my Claude usage?"* — it'll call `get_usage`. Preview the server locally with `cswap mcp` (it speaks JSON-RPC over stdio; Ctrl-D to exit).
 
+### Check your setup (`cswap doctor`)
+
+`cswap doctor` is a read-only health check — handy after setting up a new machine. It verifies your accounts, usage-store freshness, the statusline, the response badge, the menu-bar service, the harvester, the MCP dependency, and **duplicate/orphaned Keychain entries** (the classic "multiple Claude Code login entries" problem), each with a fix hint:
+
+```
+$ cswap doctor
+  ✓  package          claude-swap-cs 0.27.0b1
+  ✓  accounts         2 managed · active: personal
+  ⚠  keychain         2 cswap backups for 1 account(s) (orphaned)
+       → in Keychain Access, delete the stale items (search 'Claude Code-credentials' / 'claude-swap')
+  ✓  usage store      fresh (6m ago)
+  ✓  statusline       installed
+  ...
+```
+
+`cswap doctor --json` emits the checks for scripting. No network, no writes.
+
 ### Share your UI setup across machines (`cswap ui`)
 
 `cswap ui` saves the statusline + menu-bar **look** — global display prefs and, per account (by email), the custom label, brand color, auto-swap cap, and title override — into one portable JSON bundle. **No credentials are ever included.**
