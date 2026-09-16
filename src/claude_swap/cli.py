@@ -1423,7 +1423,7 @@ def _mcp_command(argv: list[str]) -> None:
         print("Run the cswap MCP server over stdio, for Claude Desktop to launch.\n"
               "Exposes read-only tools: get_usage, list_accounts. Register it in\n"
               "Claude Desktop's config (see the README). Needs the 'mcp' package:\n"
-              "  pip install 'claude-swap[mcp]'")
+              "  pip install 'claude-swap-cs[mcp]'")
         return
     from claude_swap import mcp_server
     try:
@@ -1432,9 +1432,9 @@ def _mcp_command(argv: list[str]) -> None:
         if (getattr(e, "name", "") or "").split(".")[0] == "mcp":
             error("The MCP server needs the 'mcp' package. Install it into cswap's "
                   "environment, e.g.:\n"
-                  "  pip install 'claude-swap[mcp]'                 # pip / uv installs\n"
-                  "  pipx inject claude-swap mcp                    # pipx installs\n"
-                  "  \"$(brew --prefix)/opt/claude-swap/libexec/bin/pip\" install mcp   # Homebrew")
+                  "  pip install 'claude-swap-cs[mcp]'                 # pip / uv installs\n"
+                  "  pipx inject claude-swap-cs mcp                    # pipx installs\n"
+                  "  \"$(brew --prefix)/opt/claude-swap-cs/libexec/bin/pip\" install mcp   # Homebrew")
             sys.exit(1)
         raise
 

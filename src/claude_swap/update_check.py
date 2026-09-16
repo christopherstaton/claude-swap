@@ -68,8 +68,8 @@ def check_for_update(current_version: str) -> str | None:
         if latest_version and _parse_version(latest_version) > _parse_version(current_version):
             method = _detect_install_method()
             direct = {
-                "uv": "uv tool upgrade claude-swap",
-                "pipx": "pipx upgrade claude-swap",
+                "uv": "uv tool upgrade claude-swap-cs",
+                "pipx": "pipx upgrade claude-swap-cs",
             }.get(method or "")
             if direct and sys.platform != "win32":
                 # cswap upgrade actually performs the upgrade here.
@@ -81,7 +81,7 @@ def check_for_update(current_version: str) -> str | None:
                 # Unknown install method: cswap upgrade shows manual instructions.
                 hint = "Run `cswap upgrade` for upgrade instructions."
             return (
-                f"A newer version of claude-swap is available ({latest_version}). "
+                f"A newer version of claude-swap-cs is available ({latest_version}). "
                 f"You are using {current_version}. {hint}"
             )
         return None
@@ -99,8 +99,8 @@ def run_self_upgrade() -> int:
 
     method = _detect_install_method()
     commands = {
-        "uv": ["uv", "tool", "upgrade", "claude-swap"],
-        "pipx": ["pipx", "upgrade", "claude-swap"],
+        "uv": ["uv", "tool", "upgrade", "claude-swap-cs"],
+        "pipx": ["pipx", "upgrade", "claude-swap-cs"],
     }
     cmd = commands.get(method or "")
     if cmd is None:
@@ -109,9 +109,9 @@ def run_self_upgrade() -> int:
             f"  sys.prefix:     {sys.prefix}\n"
             f"  sys.executable: {sys.executable}\n"
             "To upgrade manually, run one of:\n"
-            "  uv tool upgrade claude-swap\n"
-            "  pipx upgrade claude-swap\n"
-            f"  {sys.executable} -m pip install --upgrade claude-swap\n"
+            "  uv tool upgrade claude-swap-cs\n"
+            "  pipx upgrade claude-swap-cs\n"
+            f"  {sys.executable} -m pip install --upgrade claude-swap-cs\n"
             "If you installed with `pip install -e .`, use `git pull` instead."
         )
         return 1
@@ -121,7 +121,7 @@ def run_self_upgrade() -> int:
     # though the package itself updates. cswap exits right after this, which
     # releases the lock, so the user can just run the command themselves.
     if sys.platform == "win32":
-        print(f"To upgrade claude-swap on Windows, run:\n  {accent(' '.join(cmd))}")
+        print(f"To upgrade claude-swap-cs on Windows, run:\n  {accent(' '.join(cmd))}")
         return 1
 
     try:
