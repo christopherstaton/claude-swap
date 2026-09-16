@@ -1300,6 +1300,184 @@ Examples:
         print(f"  spend: {spend['pct']:.0f}%")
 
 
+def _harvest_gather(switcher, cfg):
+    """Gather the live inputs for the harvest decision (best-effort, read-only).
+
+    Returns ``(remaining_pct, usage_fresh, profile, active_sessions, unreadable)``.
+    """
+    import time
+
+    from claude_swap import process_detection as pd
+    from claude_swap import statusline as sl
+    from claude_swap import harvest as hv
+
+    remaining, fresh, profile = None, False, None
+    try:
+        snap = switcher.accounts_snapshot(fetch=set())  # store-only, no network
+        acc = None
+        if cfg.account:
+            acc = next((a for a in snap.accounts if a.email == cfg.account), None)
+        if acc is None:
+            acc = next((a for a in snap.accounts if getattr(a, "is_active", False)), None)
+        if acc is not None:
+            profile = acc.alias or acc.email.split("@", 1)[0].lower()
+            lg = acc.usage.last_good if isinstance(acc.usage.last_good, dict) else {}
+            five = lg.get("five_hour") if isinstance(lg, dict) else None
+            if isinstance(five, dict) and isinstance(five.get("pct"), (int, float)):
+                remaining = sl.remaining_from_used(float(five["pct"]))
+            age = getattr(acc.usage, "age_s", None)
+            fresh = isinstance(age, (int, float)) and age < hv.FRESH_MAX_S
+            rec = sl.read_live_usage(sl.live_usage_path(switcher.backup_dir / "cache")).get(acc.email)
+            if isinstance(rec, dict) and rec.get("five_hour_used") is not None:
+                remaining = sl.remaining_from_used(float(rec["five_hour_used"]))
+                if time.time() - rec.get("updated_at", 0) < hv.FRESH_MAX_S:
+                    fresh = True
+    except Exception:
+        pass
+    try:
+        sessions, unreadable = pd.scan_sessions()
+    except Exception:
+        sessions, unreadable = [], 1  # can't tell → treat as busy
+    return remaining, fresh, profile, len(sessions), unreadable
+
+
+def _harvest_command(argv: list[str]) -> None:
+    """Handle `cswap harvest` — run queued tasks during idle quota headroom.
+
+    Unused 5h/weekly quota doesn't roll over; this fills idle windows with YOUR
+    tasks (headless `claude -p`) when there's headroom and no other session is
+    active, always capped. This subcommand configures and inspects the policy;
+    `status` (the default) shows whether it would run right now and why. Nothing
+    here executes a task. Pre-dispatched, so it must be the first argument.
+    """
+    import time
+    from dataclasses import replace
+    from datetime import datetime
+
+    from claude_swap import harvest as hv
+
+    parser = argparse.ArgumentParser(
+        prog="cswap harvest",
+        description="Schedule tasks to use idle Claude quota headroom (opt-in).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  cswap harvest                       # status + would-it-run-now (default)
+  cswap harvest enable                # arm the harvester (off by default)
+  cswap harvest set --min-remaining 50 --start-hour 22 --end-hour 8
+  cswap harvest add-task --name docs --cwd ~/VSCode/proj --prompt "update CHANGELOG"
+  cswap harvest tasks                 # list queued tasks
+        """,
+    )
+    sub = parser.add_subparsers(dest="action",
+                                metavar="{status,enable,disable,set,add-task,tasks,remove-task}")
+    sub.add_parser("status", help="Show config + whether it would run now (default)")
+    sub.add_parser("enable", help="Arm the harvester")
+    sub.add_parser("disable", help="Disarm the harvester")
+    p_set = sub.add_parser("set", help="Set policy parameters")
+    p_set.add_argument("--min-remaining", type=float, metavar="PCT")
+    p_set.add_argument("--start-hour", type=int, metavar="H")
+    p_set.add_argument("--end-hour", type=int, metavar="H")
+    p_set.add_argument("--clear-hours", action="store_true", help="Allow any hour")
+    p_set.add_argument("--min-interval-min", type=float, metavar="MIN")
+    p_set.add_argument("--max-runs", type=int, metavar="N", help="Max runs per 5h window")
+    p_set.add_argument("--account", metavar="EMAIL", help="Harvest this account (default: active)")
+    p_add = sub.add_parser("add-task", help="Queue a task")
+    p_add.add_argument("--name", required=True)
+    p_add.add_argument("--cwd", required=True)
+    p_add.add_argument("--prompt", required=True)
+    sub.add_parser("tasks", help="List queued tasks")
+    p_rm = sub.add_parser("remove-task", help="Remove a queued task by name")
+    p_rm.add_argument("name")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    args = parser.parse_args(argv)
+
+    switcher = ClaudeAccountSwitcher(debug=args.debug)
+    backup = switcher.backup_dir
+    cfg = hv.load_config(backup)
+    action = args.action or "status"
+
+    if action == "enable":
+        hv.save_config(backup, replace(cfg, enabled=True))
+        print("Harvester armed." if cfg.tasks
+              else "Harvester armed — add tasks with `cswap harvest add-task` (nothing runs until then).")
+        return
+    if action == "disable":
+        hv.save_config(backup, replace(cfg, enabled=False))
+        print("Harvester disarmed.")
+        return
+    if action == "set":
+        updates = {}
+        if args.min_remaining is not None:
+            updates["min_remaining"] = args.min_remaining
+        if args.clear_hours:
+            updates["allow_start_hour"] = None
+            updates["allow_end_hour"] = None
+        if args.start_hour is not None:
+            updates["allow_start_hour"] = args.start_hour
+        if args.end_hour is not None:
+            updates["allow_end_hour"] = args.end_hour
+        if args.min_interval_min is not None:
+            updates["min_interval_min"] = args.min_interval_min
+        if args.max_runs is not None:
+            updates["max_runs_per_window"] = args.max_runs
+        if args.account is not None:
+            updates["account"] = args.account or None
+        hv.save_config(backup, replace(cfg, **updates))
+        print(f"Updated {', '.join(updates) or '(nothing)'}.")
+        return
+    if action == "add-task":
+        tasks = cfg.tasks + (hv.HarvestTask(name=args.name, prompt=args.prompt, cwd=args.cwd),)
+        hv.save_config(backup, replace(cfg, tasks=tasks))
+        print(f"Queued task '{args.name}' ({len(tasks)} total).")
+        return
+    if action == "remove-task":
+        tasks = tuple(t for t in cfg.tasks if t.name != args.name)
+        if len(tasks) == len(cfg.tasks):
+            print(f"No task named '{args.name}'.")
+            return
+        hv.save_config(backup, replace(cfg, tasks=tasks))
+        print(f"Removed task '{args.name}'.")
+        return
+    if action == "tasks":
+        if not cfg.tasks:
+            print("No tasks queued. Add one with `cswap harvest add-task`.")
+            return
+        for t in cfg.tasks:
+            print(f"  {t.name}: {t.prompt!r}  (in {t.cwd})")
+        return
+
+    # default: status + live gate evaluation
+    remaining, fresh, profile, active, unreadable = _harvest_gather(switcher, cfg)
+    state = hv.load_state(backup)
+    last_run = state.get("last_run_ts")
+    since = (time.time() - last_run) if isinstance(last_run, (int, float)) else None
+    decision = hv.decide_idle_run(
+        remaining_pct=remaining, min_remaining=cfg.min_remaining,
+        active_sessions=active, session_scan_unreadable=unreadable,
+        tasks_available=bool(cfg.tasks), now=datetime.now(),
+        allow_start_hour=cfg.allow_start_hour, allow_end_hour=cfg.allow_end_hour,
+        seconds_since_last_run=since, min_interval_s=cfg.min_interval_min * 60,
+        runs_this_window=int(state.get("runs_this_window", 0) or 0),
+        max_runs_per_window=cfg.max_runs_per_window,
+        usage_fresh=fresh, already_running=bool(state.get("running")),
+    )
+    hours = ("any" if cfg.allow_start_hour is None or cfg.allow_end_hour is None
+             else f"{cfg.allow_start_hour:02d}:00–{cfg.allow_end_hour:02d}:00")
+    rem_s = f"{int(remaining)}%" if remaining is not None else "unknown"
+    print(f"Harvester: {'ARMED' if cfg.enabled else 'disarmed'}")
+    print(f"  account:      {profile or cfg.account or '(active)'}")
+    print(f"  5h remaining: {rem_s}  ({'fresh' if fresh else 'stale'})")
+    print(f"  policy:       run when ≥{int(cfg.min_remaining)}% · hours {hours} · "
+          f"≤{cfg.max_runs_per_window}/window · ≥{cfg.min_interval_min:g}m apart")
+    print(f"  other sessions active: {active}" + (f" (+{unreadable} unreadable)" if unreadable else ""))
+    print(f"  tasks queued: {len(cfg.tasks)}")
+    verdict = "WOULD RUN" if decision.run else "would skip"
+    if decision.run and not cfg.enabled:
+        verdict = "would skip (disarmed)"
+    print(f"  → {verdict}: {decision.reason}")
+
+
 def _threshold_command(argv: list[str]) -> None:
     """Handle `cswap threshold [NUM|EMAIL [PCT]] [--unset]` — per-account caps.
 
@@ -1513,6 +1691,9 @@ def main() -> None:
         return
     if argv and argv[0] == "ui":
         _ui_command(argv[1:])
+        return
+    if argv and argv[0] == "harvest":
+        _harvest_command(argv[1:])
         return
     if argv and argv[0] == "map":
         _map_command(argv[1:])
