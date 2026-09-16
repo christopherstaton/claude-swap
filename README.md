@@ -343,6 +343,30 @@ Harvester: disarmed
 
 > `cswap harvest run` executes a task now (behind the gate); a bundled **launchd** timer that ticks it automatically is the next increment — until then, point your own cron/launchd at `cswap harvest run`.
 
+### Usage in Claude Desktop (MCP server)
+
+`cswap mcp` runs a small [Model Context Protocol](https://modelcontextprotocol.io) server over stdio, so **Claude Desktop** (which has no third-party statusline) can read your cswap usage on demand. It exposes **read-only** tools — `get_usage` (active or a named account) and `list_accounts` (every account, which is active, and each one's 5h **remaining** %). No account switching from Desktop.
+
+It needs the optional `mcp` package installed into cswap's environment:
+
+```bash
+pip install 'claude-swap[mcp]'        # pip / uv installs
+pipx inject claude-swap mcp           # pipx installs
+# Homebrew:  "$(brew --prefix)/opt/claude-swap/libexec/bin/pip" install mcp
+```
+
+Then register it in Claude Desktop's config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "cswap": { "command": "cswap", "args": ["mcp"] }
+  }
+}
+```
+
+Restart Claude Desktop and ask *"what's my Claude usage?"* — it'll call `get_usage`. Preview the server locally with `cswap mcp` (it speaks JSON-RPC over stdio; Ctrl-D to exit).
+
 ### Share your UI setup across machines (`cswap ui`)
 
 `cswap ui` saves the statusline + menu-bar **look** — global display prefs and, per account (by email), the custom label, brand color, auto-swap cap, and title override — into one portable JSON bundle. **No credentials are ever included.**

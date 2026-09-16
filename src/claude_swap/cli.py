@@ -1404,6 +1404,32 @@ def _harvest_run(switcher, cfg, *, dry_run=False, gather=None, execute=None) -> 
     return {"ran": True, "task": task.name, "exit_code": code}
 
 
+def _mcp_command(argv: list[str]) -> None:
+    """Handle `cswap mcp` — run the MCP server for Claude Desktop over stdio.
+
+    Claude Desktop launches this and calls its read-only usage tools. Needs the
+    optional ``mcp`` package. Pre-dispatched, so it must be the first argument.
+    """
+    if argv and argv[0] in ("-h", "--help"):
+        print("Run the cswap MCP server over stdio, for Claude Desktop to launch.\n"
+              "Exposes read-only tools: get_usage, list_accounts. Register it in\n"
+              "Claude Desktop's config (see the README). Needs the 'mcp' package:\n"
+              "  pip install 'claude-swap[mcp]'")
+        return
+    from claude_swap import mcp_server
+    try:
+        mcp_server.run_server()
+    except ModuleNotFoundError as e:
+        if (getattr(e, "name", "") or "").split(".")[0] == "mcp":
+            error("The MCP server needs the 'mcp' package. Install it into cswap's "
+                  "environment, e.g.:\n"
+                  "  pip install 'claude-swap[mcp]'                 # pip / uv installs\n"
+                  "  pipx inject claude-swap mcp                    # pipx installs\n"
+                  "  \"$(brew --prefix)/opt/claude-swap/libexec/bin/pip\" install mcp   # Homebrew")
+            sys.exit(1)
+        raise
+
+
 def _harvest_command(argv: list[str]) -> None:
     """Handle `cswap harvest` — run queued tasks during idle quota headroom.
 
@@ -1770,6 +1796,9 @@ def main() -> None:
         return
     if argv and argv[0] == "harvest":
         _harvest_command(argv[1:])
+        return
+    if argv and argv[0] == "mcp":
+        _mcp_command(argv[1:])
         return
     if argv and argv[0] == "map":
         _map_command(argv[1:])
