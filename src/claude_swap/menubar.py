@@ -108,6 +108,7 @@ class MenuBarSettings:
     title_scoped: bool = False  # append per-model weekly limits (e.g. Fable) to the title
     show_icon: bool = True  # show the ⇄ glyph in the menu-bar title
     title_battery: bool = False  # append a battery-drain gauge for the binding window
+    stacked: bool = False  # show every managed account on its own line (multi-line title)
     # Per-account override of ``title_pct`` for when that account is active,
     # keyed by email (stable across slot renumbering): email -> a
     # TITLE_PCT_CHOICES value. Absent / "default" defers to the global
@@ -505,6 +506,38 @@ def _remaining_pct(used: float) -> float:
     return max(0.0, min(100.0, 100.0 - used))
 
 
+def _title_segments(usage, settings: MenuBarSettings, now: float, title_pct: str) -> list[str]:
+    """The percent / scoped / gauge segments of a title (no account name).
+
+    Shared by ``format_title`` (active account, single line) and
+    ``format_stacked_title`` (one line per account). Percentages are *remaining*
+    (100 − used), so the title drains 100→0.
+    """
+    segments: list[str] = []
+    if title_pct in ("5h", "both"):
+        p = _window_pct(usage, "five_hour")
+        if p is not None:
+            segments.append(f"{_remaining_pct(p):.0f}%")
+    if title_pct in ("7d", "both"):
+        seven = usage.get("seven_day") if isinstance(usage, dict) else None
+        seven = _rolled_weekly_window(seven, now)  # reflect a passed weekly reset
+        p = seven["pct"] if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)) else None
+        if p is not None:
+            segments.append(f"{_remaining_pct(p):.0f}%")
+    if settings.title_scoped and isinstance(usage, dict):
+        # Per-model weekly limits (e.g. Fable), same shape/roll-forward as the
+        # dropdown rows; named so multiple scoped models stay distinguishable.
+        for window in usage.get("scoped") or []:
+            window = _rolled_weekly_window(window, now)
+            if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
+                segments.append(f"{window['name']} {_remaining_pct(window['pct']):.0f}%")
+    if settings.title_battery:
+        bp = _binding_pct(usage, now)
+        if bp is not None:
+            segments.append(format_gauge(bp))
+    return segments
+
+
 def format_title(
     active_email: str | None,
     active_usage: dict | str | None,
@@ -530,27 +563,7 @@ def format_title(
     segments: list[str] = []
     if settings.show_account_name:
         segments.append(alias if alias else _local_part(active_email))
-    if title_pct in ("5h", "both"):
-        p = _window_pct(active_usage, "five_hour")
-        if p is not None:
-            segments.append(f"{_remaining_pct(p):.0f}%")
-    if title_pct in ("7d", "both"):
-        seven = active_usage.get("seven_day") if isinstance(active_usage, dict) else None
-        seven = _rolled_weekly_window(seven, now)  # reflect a passed weekly reset
-        p = seven["pct"] if isinstance(seven, dict) and isinstance(seven.get("pct"), (int, float)) else None
-        if p is not None:
-            segments.append(f"{_remaining_pct(p):.0f}%")
-    if settings.title_scoped and isinstance(active_usage, dict):
-        # Per-model weekly limits (e.g. Fable), same shape/roll-forward as the
-        # dropdown rows; named so multiple scoped models stay distinguishable.
-        for window in active_usage.get("scoped") or []:
-            window = _rolled_weekly_window(window, now)
-            if isinstance(window, dict) and isinstance(window.get("pct"), (int, float)) and window.get("name"):
-                segments.append(f"{window['name']} {_remaining_pct(window['pct']):.0f}%")
-    if settings.title_battery:
-        bp = _binding_pct(active_usage, now)
-        if bp is not None:
-            segments.append(format_gauge(bp))
+    segments += _title_segments(active_usage, settings, now, title_pct)
     icon = ICON if settings.show_icon else ""
     if not segments:
         # Never leave the status item blank: an all-off title still needs a
@@ -559,6 +572,32 @@ def format_title(
     if not icon:
         return " · ".join(segments)
     return f"{icon} " + " · ".join(segments)
+
+
+def format_stacked_title(accounts, settings: MenuBarSettings, now: float | None = None) -> str:
+    """A multi-line title: one line per managed (non-disabled) account.
+
+    Each line carries the account name plus its remaining-% segments — the same
+    content as the single-account title — with the active account marked by the
+    icon and the others indented to align. Lines are joined by ``\\n``; the menu-
+    bar glue renders them as a small-font attributed title (falling back to a
+    single line if AppKit can't). ``accounts`` is the snapshot's account tuples
+    ``(num, email, is_active, usage, last_good, alias, disabled, fetched_at)``.
+    """
+    if now is None:
+        now = time.time()
+    lines: list[str] = []
+    for acct in accounts:
+        email, is_active, usage, alias, disabled = acct[1], acct[2], acct[3], acct[5], acct[6]
+        if disabled:
+            continue
+        override = account_title_pct(settings, email)
+        title_pct = override if override in TITLE_PCT_CHOICES else settings.title_pct
+        segs = [alias if alias else _local_part(email),
+                *_title_segments(usage, settings, now, title_pct)]
+        marker = (f"{ICON} " if is_active else "   ") if settings.show_icon else ""
+        lines.append(marker + " · ".join(segs))
+    return "\n".join(lines) if lines else ICON
 
 
 def format_usage_log(email: str, usage: dict | str | None) -> str | None:
@@ -883,13 +922,18 @@ def run(switcher) -> int:
         # ---- menu construction -----------------------------------------------
         def rebuild_menu(self):
             active_email = self.snapshot["active_email"]
-            self.title = format_title(
-                active_email,
-                self.snapshot["active_usage"],
-                self.settings,
-                alias=self.snapshot.get("active_alias"),
-                pct_override=account_title_pct(self.settings, active_email),
-            )
+            if self.settings.stacked and self.snapshot["accounts"]:
+                text = format_stacked_title(self.snapshot["accounts"], self.settings)
+                self.title = text.replace("\n", "   ")   # single-line fallback
+                self._apply_stacked_title(text)          # small-font 2-line (best-effort)
+            else:
+                self.title = format_title(
+                    active_email,
+                    self.snapshot["active_usage"],
+                    self.settings,
+                    alias=self.snapshot.get("active_alias"),
+                    pct_override=account_title_pct(self.settings, active_email),
+                )
             # Stop a rumps memory leak: rumps registers each menu item's callback
             # in the process-global NSApp._ns_to_py_and_callback, but Menu.clear()
             # never removes them, so rebuilding the whole menu on every refresh
@@ -1076,6 +1120,12 @@ def run(switcher) -> int:
             battery_item.state = 1 if self.settings.title_battery else 0
             menu.add(battery_item)
 
+            stacked_item = rumps.MenuItem(
+                "Stack accounts (multi-line)", callback=self.on_toggle_stacked
+            )
+            stacked_item.state = 1 if self.settings.stacked else 0
+            menu.add(stacked_item)
+
             icon_item = rumps.MenuItem(
                 f"Show swap icon ({ICON})", callback=self.on_toggle_icon
             )
@@ -1103,6 +1153,35 @@ def run(switcher) -> int:
             menu.add(threshold_menu)
 
             return menu
+
+        def _apply_stacked_title(self, text):
+            """Render ``text`` as a small-font, multi-line attributed title on the
+            status-item button. Best-effort: any rumps/AppKit internal difference
+            silently leaves the single-line fallback already set on ``self.title``.
+            The macOS menu bar is ~22px tall, so this suits ~2 short lines.
+            """
+            try:
+                import AppKit
+                import rumps
+                button = rumps.rumps.NSApp.nsstatusitem.button()
+                if button is None:
+                    return
+                cell = button.cell()
+                cell.setUsesSingleLineMode_(False)
+                cell.setWraps_(True)
+                cell.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+                para = AppKit.NSMutableParagraphStyle.alloc().init()
+                para.setAlignment_(AppKit.NSTextAlignmentCenter)
+                para.setMaximumLineHeight_(10.0)
+                para.setLineSpacing_(0.0)
+                attrs = {
+                    AppKit.NSFontAttributeName: AppKit.NSFont.menuBarFontOfSize_(9.0),
+                    AppKit.NSParagraphStyleAttributeName: para,
+                }
+                attr = AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+                button.setAttributedTitle_(attr)
+            except Exception:
+                pass
 
         # ---- callbacks --------------------------------------------------------
         def _save_and_rebuild(self):
@@ -1238,6 +1317,10 @@ def run(switcher) -> int:
 
         def on_toggle_battery(self, _sender):
             self.settings.title_battery = not self.settings.title_battery
+            self._save_and_rebuild()
+
+        def on_toggle_stacked(self, _sender):
+            self.settings.stacked = not self.settings.stacked
             self._save_and_rebuild()
 
         def on_toggle_icon(self, _sender):

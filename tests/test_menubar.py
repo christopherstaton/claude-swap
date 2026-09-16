@@ -703,3 +703,43 @@ def test_settings_defaults_new_fields(tmp_path: Path):
     assert s.show_icon is True
     assert s.title_battery is False
     assert s.account_pct == {}
+
+
+# --- stacked (multi-line) title: both profiles, one line each ------------------
+
+def _stacked_acct(num, email, active, used5h, alias="", disabled=False):
+    usage = {"five_hour": {"pct": used5h}}
+    return (num, email, active, usage, usage, alias, disabled, None)
+
+
+def test_format_stacked_title_two_accounts_active_marked():
+    s = menubar.MenuBarSettings(title_pct="5h", show_icon=True)
+    accts = [_stacked_acct("1", "personal@x.com", True, 35, "personal"),
+             _stacked_acct("2", "work@x.com", False, 12, "work")]
+    lines = menubar.format_stacked_title(accts, s, now=1000.0).split("\n")
+    assert lines == ["⇄ personal · 65%", "   work · 88%"]
+
+
+def test_format_stacked_title_skips_disabled():
+    s = menubar.MenuBarSettings(title_pct="5h")
+    accts = [_stacked_acct("1", "aaa@x.com", True, 10, "aaa"),
+             _stacked_acct("2", "zzz@x.com", False, 50, "zzz", disabled=True)]
+    out = menubar.format_stacked_title(accts, s, now=1000.0)
+    assert "\n" not in out and "aaa · 90%" in out and "zzz" not in out
+
+
+def test_format_stacked_title_no_icon_no_marker():
+    s = menubar.MenuBarSettings(title_pct="5h", show_icon=False)
+    accts = [_stacked_acct("1", "aaa@x.com", True, 10, "aaa")]
+    assert menubar.format_stacked_title(accts, s, now=1000.0) == "aaa · 90%"
+
+
+def test_format_stacked_title_empty_is_icon():
+    assert menubar.format_stacked_title([], menubar.MenuBarSettings(), now=1000.0) == menubar.ICON
+
+
+def test_menubar_settings_stacked_default_off_and_roundtrip(tmp_path):
+    assert menubar.MenuBarSettings().stacked is False
+    p = tmp_path / "m.json"
+    menubar.MenuBarSettings(stacked=True).save(p)
+    assert menubar.MenuBarSettings.load(p).stacked is True
