@@ -108,7 +108,7 @@ class MenuBarSettings:
     title_scoped: bool = False  # append per-model weekly limits (e.g. Fable) to the title
     show_icon: bool = True  # show the ⇄ glyph in the menu-bar title
     title_battery: bool = False  # append a battery-drain gauge for the binding window
-    stacked: bool = False  # show every managed account on its own line (multi-line title)
+    stacked: bool = True  # show every managed account on its own line (multi-line title)
     # Per-account override of ``title_pct`` for when that account is active,
     # keyed by email (stable across slot renumbering): email -> a
     # TITLE_PCT_CHOICES value. Absent / "default" defers to the global
@@ -595,7 +595,9 @@ def format_stacked_title(accounts, settings: MenuBarSettings, now: float | None 
         title_pct = override if override in TITLE_PCT_CHOICES else settings.title_pct
         segs = [alias if alias else _local_part(email),
                 *_title_segments(usage, settings, now, title_pct)]
-        marker = (f"{ICON} " if is_active else "   ") if settings.show_icon else ""
+        # A dot marks the active profile; others align under it. (The ⇄ swap glyph
+        # isn't used per-line in the stack — the dot is the active indicator.)
+        marker = "● " if is_active else "  "
         lines.append(marker + " · ".join(segs))
     return "\n".join(lines) if lines else ICON
 

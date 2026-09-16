@@ -1792,21 +1792,24 @@ def _ui_command(argv: list[str]) -> None:
     from pathlib import Path
 
     from claude_swap import ui_settings as uis
+    from claude_swap.menubar import ACCOUNT_PCT_CHOICES
 
     parser = argparse.ArgumentParser(
         prog="cswap ui",
-        description="Show, export, or import the statusline / menu-bar UI settings.",
+        description="Show, export, import, or set the statusline / menu-bar UI settings.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   cswap ui                        # show the current UI settings
   cswap ui export                 # write ~/cswap-ui.json (share it to another Mac)
-  cswap ui export ui.json         # write to a path ('-' = stdout)
   cswap ui import ui.json         # apply a bundle; lists accounts still to add
+  cswap ui stacked on             # one menu-bar line per account (active marked ●)
+  cswap ui scoped on              # show per-model / scoped ("cowork") limits in the title
+  cswap ui title UC 5h            # UC's title shows only 5h (hide the 7d weekly)
         """,
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
-    sub = parser.add_subparsers(dest="action", metavar="{show,export,import}")
+    sub = parser.add_subparsers(dest="action", metavar="{show,export,import,stacked,scoped,title}")
     sub.add_parser("show", help="Show the current UI settings (the default)")
     p_exp = sub.add_parser("export", help="Write the UI settings to a shareable JSON bundle")
     p_exp.add_argument("file", nargs="?", metavar="FILE",
@@ -1815,9 +1818,40 @@ Examples:
     p_imp.add_argument("file", metavar="FILE", help="Bundle path ('-' for stdin)")
     p_imp.add_argument("--no-labels", action="store_true",
                        help="Apply colors/thresholds but not account aliases/labels")
+    p_stk = sub.add_parser("stacked", help="One menu-bar line per account (on/off)")
+    p_stk.add_argument("value", choices=["on", "off"])
+    p_scp = sub.add_parser("scoped", help="Show per-model / scoped limits in the title (on/off)")
+    p_scp.add_argument("value", choices=["on", "off"])
+    p_ttl = sub.add_parser("title", help="Per-account: which percentages the title shows")
+    p_ttl.add_argument("account", metavar="NUM|EMAIL")
+    p_ttl.add_argument("choice", choices=list(ACCOUNT_PCT_CHOICES),
+                       help="default | off | 5h | 7d | both")
     args = parser.parse_args(argv)
 
     switcher = ClaudeAccountSwitcher(debug=args.debug)
+
+    if args.action in ("stacked", "scoped", "title"):
+        from claude_swap.menubar import MenuBarSettings
+        mpath = switcher.backup_dir / "menubar_settings.json"
+        ms = MenuBarSettings.load(mpath)
+        if args.action == "stacked":
+            ms.stacked = args.value == "on"
+            print(f"Menu-bar stacked (one line per account): {'on' if ms.stacked else 'off'}")
+        elif args.action == "scoped":
+            ms.title_scoped = args.value == "on"
+            print(f"Menu-bar model/scoped limits in title: {'on' if ms.title_scoped else 'off'}")
+        else:  # title
+            _, email, _ = _resolve_or_exit(switcher, args.account)
+            if args.choice == "default":
+                ms.account_pct.pop(email, None)
+                print(f"{email}: title percentages → default (global)")
+            else:
+                ms.account_pct[email] = args.choice
+                print(f"{email}: title shows {args.choice}")
+        ms.save(mpath)
+        print(dimmed("Restart the menu bar to apply "
+                     "(quit & re-run `cswap menubar`, or kickstart the service)."))
+        return
 
     if args.action in (None, "show"):
         _ui_print_show(uis.collect_ui_settings(switcher))

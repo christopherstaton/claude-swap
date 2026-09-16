@@ -717,7 +717,7 @@ def test_format_stacked_title_two_accounts_active_marked():
     accts = [_stacked_acct("1", "personal@x.com", True, 35, "personal"),
              _stacked_acct("2", "work@x.com", False, 12, "work")]
     lines = menubar.format_stacked_title(accts, s, now=1000.0).split("\n")
-    assert lines == ["⇄ personal · 65%", "   work · 88%"]
+    assert lines == ["● personal · 65%", "  work · 88%"]
 
 
 def test_format_stacked_title_skips_disabled():
@@ -728,18 +728,18 @@ def test_format_stacked_title_skips_disabled():
     assert "\n" not in out and "aaa · 90%" in out and "zzz" not in out
 
 
-def test_format_stacked_title_no_icon_no_marker():
+def test_format_stacked_title_active_dot_regardless_of_show_icon():
     s = menubar.MenuBarSettings(title_pct="5h", show_icon=False)
     accts = [_stacked_acct("1", "aaa@x.com", True, 10, "aaa")]
-    assert menubar.format_stacked_title(accts, s, now=1000.0) == "aaa · 90%"
+    assert menubar.format_stacked_title(accts, s, now=1000.0) == "● aaa · 90%"
 
 
 def test_format_stacked_title_empty_is_icon():
     assert menubar.format_stacked_title([], menubar.MenuBarSettings(), now=1000.0) == menubar.ICON
 
 
-def test_menubar_settings_stacked_default_off_and_roundtrip(tmp_path):
-    assert menubar.MenuBarSettings().stacked is False
+def test_menubar_settings_stacked_default_on_and_roundtrip(tmp_path):
+    assert menubar.MenuBarSettings().stacked is True
     p = tmp_path / "m.json"
-    menubar.MenuBarSettings(stacked=True).save(p)
-    assert menubar.MenuBarSettings.load(p).stacked is True
+    menubar.MenuBarSettings(stacked=False).save(p)
+    assert menubar.MenuBarSettings.load(p).stacked is False
