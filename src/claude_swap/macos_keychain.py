@@ -156,6 +156,30 @@ def item_exists(service: str, account: str) -> bool:
     return result.returncode == 0
 
 
+def count_service_items(service: str) -> int | None:
+    """How many login-Keychain generic-password items have this ``service``.
+
+    Uses ``security dump-keychain`` **metadata only** (no ``-d``), so it never
+    decrypts a secret and never prompts. Returns the count, or ``None`` when
+    ``security`` can't be run (non-macOS, missing binary, timeout). Used to flag
+    duplicate "Claude Code-credentials" login items (``cswap doctor``).
+    """
+    try:
+        result = subprocess.run(
+            [_SECURITY, "dump-keychain"],
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    # Each item lists its service as: `"svce"<blob>="<service>"`.
+    needle = f'"svce"<blob>="{service}"'
+    return sum(1 for line in result.stdout.splitlines() if needle in line)
+
+
 def set_password(service: str, account: str, password: str) -> None:
     """Create or update a generic-password item (``-U``).
 
