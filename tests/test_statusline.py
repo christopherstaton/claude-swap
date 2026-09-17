@@ -17,6 +17,7 @@ from claude_swap import statusline as sl
 
 _PAYLOAD = {
     "session_id": "abc123",
+    "session_name": "my-session",
     "model": {"id": "claude-opus", "display_name": "Opus"},
     "workspace": {"current_dir": "/Users/me/luet-apps", "project_dir": "/Users/me/luet-apps"},
     "context_window": {"context_window_size": 200000, "used_percentage": 42},
@@ -32,6 +33,7 @@ _PAYLOAD = {
 def test_parse_input_full():
     inp = sl.parse_input(json.dumps(_PAYLOAD))
     assert inp.session_id == "abc123"
+    assert inp.session_name == "my-session"
     assert inp.model == "Opus"
     assert inp.current_dir == "/Users/me/luet-apps"
     assert inp.context_pct == 42.0
@@ -60,6 +62,50 @@ def test_parse_input_empty_and_broken():
     assert sl.parse_input("") == sl.StatuslineInput()
     assert sl.parse_input("not json") == sl.StatuslineInput()
     assert sl.parse_input("[1,2]") == sl.StatuslineInput()
+
+
+def test_parse_input_absent_session_name():
+    # The default `my-app-3f` display name doesn't populate session_name.
+    inp = sl.parse_input(json.dumps({"session_id": "z"}))
+    assert inp.session_name is None
+
+
+# --- repo segment: repo name inside a repo, chat name outside one ---------------
+
+def test_resolve_repo_label_in_repo_uses_folder():
+    # Inside a git repo the segment is the working dir's basename — the chat name
+    # is ignored even when set.
+    label = sl.resolve_repo_label(
+        current_dir="/Users/me/luet-apps", session_name="my-session", in_git_repo=True,
+    )
+    assert label == "luet-apps"
+
+
+def test_resolve_repo_label_outside_repo_uses_chat_name():
+    # No repo to name → fall back to Claude Code's chat name.
+    label = sl.resolve_repo_label(
+        current_dir="/Users/me/scratch", session_name="planning-chat", in_git_repo=False,
+    )
+    assert label == "planning-chat"
+
+
+def test_resolve_repo_label_outside_repo_without_chat_name_keeps_folder():
+    # Outside a repo with no chat name, keep the folder basename (never blank).
+    label = sl.resolve_repo_label(
+        current_dir="/Users/me/scratch/", session_name=None, in_git_repo=False,
+    )
+    assert label == "scratch"
+
+
+def test_resolve_repo_label_nothing_to_show():
+    assert sl.resolve_repo_label(current_dir=None, session_name=None, in_git_repo=True) is None
+    assert sl.resolve_repo_label(current_dir=None, session_name=None, in_git_repo=False) is None
+
+
+def test_is_git_repo(tmp_path):
+    assert sl.is_git_repo(str(tmp_path)) is False
+    # The project checkout this test runs in is a git work tree.
+    assert sl.is_git_repo(os.path.dirname(os.path.abspath(__file__))) is True
 
 
 # --- color banding -------------------------------------------------------------

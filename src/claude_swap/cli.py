@@ -1083,7 +1083,14 @@ Examples:
     inp = sl.parse_input(stdin_text)
     color = not args.no_color and not os.environ.get("NO_COLOR")
     branch = None if args.no_branch else sl.current_git_branch(inp.current_dir)
-    repo = os.path.basename(inp.current_dir.rstrip("/")) if inp.current_dir else None
+    # Repo segment: the working dir's name inside a git repo, else the chat's own
+    # name (session_name) when Claude Code provides one. A live branch already
+    # proves we're in a repo; otherwise (detached HEAD, --no-branch, or no repo)
+    # ask git directly so the fallback only kicks in outside a work tree.
+    in_git_repo = bool(branch) or sl.is_git_repo(inp.current_dir)
+    repo = sl.resolve_repo_label(
+        current_dir=inp.current_dir, session_name=inp.session_name, in_git_repo=in_git_repo,
+    )
 
     # Never let a statusline error break Claude Code's prompt: the stdin-derived
     # segments (model/effort/context/branch/repo) still render on any failure.

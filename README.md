@@ -284,6 +284,8 @@ UCHICAGO 54% │ Opus high 42% │ ⎇ main │ luet-apps
 └ profile+usage ┘ └ model effort ctx% ┘ └ branch ┘ └ repo ┘
 ```
 
+The last segment is the repo name inside a git work tree. Outside one — where there's no repo to name — it falls back to Claude Code's **chat name** (the `--name`/`/rename` label, or the AI-generated session title) so a scratch or home-directory window still shows something that tells it apart. When neither applies it keeps the plain folder name.
+
 It reads Claude's own live payload fields — `rate_limits.five_hour.used_percentage`, `context_window.used_percentage`, `effort.level` — so there's nothing to fetch. The usage is shown as **remaining** quota and color-bands as it drains (green → yellow → red); context% bands to signal when `/clear` would help. Remaining is clamped to 0–100, so a 5h window that overruns (used > 100%) shows `0%`, never a negative like `-4%`. On an account switch it sources usage from cswap's store for a 60s grace window (keyed per session on `session_id`) so the % matches the new profile instantly, before Claude's payload catches up.
 
 **Every window stays current.** A Claude Code session only updates its own `rate_limits` when it makes an API call, so an idle background window's usage would otherwise freeze. Each window folds its reading into one shared per-account record and reads back the freshest value, so the busy window keeps the idle ones up to date — all your terminals show the same, current profile and usage. Lower `--refresh` to make them converge sooner.

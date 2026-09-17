@@ -6,6 +6,11 @@ account + draining 5h usage, model + effort + context, git branch, and repo:
     UCHICAGO 54% │ Opus high 42% │ ⎇ main │ luet-apps
     └ profile+usage ┘ └ model effort ctx% ┘ └ branch ┘ └ repo ┘
 
+The last segment is the repo name inside a git work tree; outside one (no repo
+to name) it falls back to Claude Code's chat name — the ``--name``/``/rename``
+label or AI-generated title (``session_name``) — so the segment still tells the
+windows apart. See ``resolve_repo_label``.
+
 Claude Code pipes a JSON payload on stdin every render (schema:
 https://code.claude.com/docs/en/statusline.md). This reads its *native* live
 fields — ``rate_limits.five_hour.used_percentage``, ``context_window``,
@@ -123,6 +128,7 @@ class StatuslineInput:
     current_dir: str | None = None
     model: str | None = None
     session_id: str | None = None
+    session_name: str | None = None
     context_pct: float | None = None
     effort: str | None = None
     fast_mode: bool = False
@@ -157,6 +163,10 @@ def parse_input(stdin_text: str) -> StatuslineInput:
         current_dir=_str(_dig(data, "workspace", "current_dir")) or _str(data.get("cwd")),
         model=_str(_dig(data, "model", "display_name")),
         session_id=_str(data.get("session_id")),
+        # The chat's custom name: `--name`/`/rename`, else Claude's AI-generated
+        # session title. Absent for the default `my-app-3f` display name. Used as
+        # the repo-segment fallback when the cwd isn't a git repo (resolve_repo_label).
+        session_name=_str(data.get("session_name")),
         context_pct=_num(_dig(data, "context_window", "used_percentage")),
         effort=_str(_dig(data, "effort", "level")),
         fast_mode=bool(data.get("fast_mode")),
@@ -444,6 +454,48 @@ def current_git_branch(cwd: str | None = None) -> str | None:
         return None
     branch = out.stdout.strip()
     return branch or None
+
+
+def is_git_repo(cwd: str | None = None) -> bool:
+    """Whether ``cwd`` is inside a git work tree (short-timeout, never raises).
+
+    Uses ``git rev-parse --is-inside-work-tree`` so a repo in detached-HEAD (no
+    current branch) still counts — unlike inferring repo-ness from a branch name.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=cwd or None,
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and out.stdout.strip() == "true"
+
+
+def resolve_repo_label(
+    *,
+    current_dir: str | None,
+    session_name: str | None,
+    in_git_repo: bool,
+) -> str | None:
+    """The repo segment's text: the repo/folder name, or the chat name outside a repo.
+
+    Inside a git work tree we show the working directory's basename (the repo).
+    Outside one there's no repo to name, so we fall back to Claude Code's chat
+    name (``session_name`` — a ``--name``/``/rename`` label or the AI-generated
+    title) when the session has one; failing that we keep the folder basename so
+    the segment never regresses to blank. ``None`` only when we have nothing.
+    """
+    folder = os.path.basename(current_dir.rstrip("/")) if current_dir else None
+    if in_git_repo:
+        return folder
+    return session_name or folder
 
 
 # ---- Claude Code settings.json integration (`cswap statusline --install`) ------
