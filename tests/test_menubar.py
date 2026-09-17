@@ -720,12 +720,25 @@ def test_format_stacked_title_two_accounts_active_marked():
     assert lines == ["● personal · 65%", "  work · 88%"]
 
 
-def test_format_stacked_title_skips_disabled():
+def test_format_stacked_title_shows_disabled_accounts():
+    # Every added account gets a line regardless of disabled state — `cswap
+    # disable` only bars auto-rotation, it must not drop the account from the
+    # two-line title. A non-active disabled account still shows, aligned.
     s = menubar.MenuBarSettings(title_pct="5h")
     accts = [_stacked_acct("1", "aaa@x.com", True, 10, "aaa"),
              _stacked_acct("2", "zzz@x.com", False, 50, "zzz", disabled=True)]
-    out = menubar.format_stacked_title(accts, s, now=1000.0)
-    assert "\n" not in out and "aaa · 90%" in out and "zzz" not in out
+    lines = menubar.format_stacked_title(accts, s, now=1000.0).split("\n")
+    assert lines == ["● aaa · 90%", "  zzz · 50%"]
+
+
+def test_format_stacked_title_shows_both_when_active_is_disabled():
+    # Both accounts visible even when the active one is disabled — the two-line
+    # view must never collapse to one line or the bare icon.
+    s = menubar.MenuBarSettings(title_pct="5h")
+    accts = [_stacked_acct("1", "aaa@x.com", True, 10, "aaa", disabled=True),
+             _stacked_acct("2", "zzz@x.com", False, 50, "zzz")]
+    lines = menubar.format_stacked_title(accts, s, now=1000.0).split("\n")
+    assert lines == ["● aaa · 90%", "  zzz · 50%"]
 
 
 def test_format_stacked_title_active_dot_regardless_of_show_icon():

@@ -575,7 +575,12 @@ def format_title(
 
 
 def format_stacked_title(accounts, settings: MenuBarSettings, now: float | None = None) -> str:
-    """A multi-line title: one line per managed (non-disabled) account.
+    """A multi-line title: one line per managed account — every added account.
+
+    Both accounts' remaining-% lines are always shown, regardless of active or
+    disabled state (``cswap disable`` only bars auto-rotation, it doesn't hide the
+    account). The active account is marked with the ● dot; the others align under
+    it.
 
     Each line carries the account name plus its remaining-% segments — the same
     content as the single-account title — with the active account marked by the
@@ -588,9 +593,11 @@ def format_stacked_title(accounts, settings: MenuBarSettings, now: float | None 
         now = time.time()
     lines: list[str] = []
     for acct in accounts:
-        email, is_active, usage, alias, disabled = acct[1], acct[2], acct[3], acct[5], acct[6]
-        if disabled:
-            continue
+        # Every managed account gets a line — active or disabled. `cswap disable`
+        # only bars an account from auto-rotation; you still want both accounts'
+        # remaining quota visible at a glance, so the stacked title never hides a
+        # line (a disabled account is not dropped — it's just off auto-switch).
+        email, is_active, usage, alias = acct[1], acct[2], acct[3], acct[5]
         override = account_title_pct(settings, email)
         title_pct = override if override in TITLE_PCT_CHOICES else settings.title_pct
         segs = [alias if alias else _local_part(email),
