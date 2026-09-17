@@ -851,6 +851,14 @@ def run(switcher) -> int:
             if self._dirty:
                 self._dirty = False
                 self.rebuild_menu()
+            elif getattr(self, "_stacked_text", None):
+                # Re-assert the two-line attributed title. rumps/AppKit can revert
+                # the status button to its plain (single-line) title between the
+                # data-driven rebuilds — which are up to a refresh interval apart —
+                # collapsing the stack. Re-applying the same attributed title each
+                # 1s tick heals that within a second (idempotent; no self.title
+                # write here, so no plain→attributed flash).
+                self._apply_stacked_title(self._stacked_text)
             self._detect_active_change()
             self._drain_engine_events()
 
@@ -947,9 +955,11 @@ def run(switcher) -> int:
             active_email = self.snapshot["active_email"]
             if self.settings.stacked and self.snapshot["accounts"]:
                 text = format_stacked_title(self.snapshot["accounts"], self.settings)
+                self._stacked_text = text                # re-asserted each sync tick
                 self.title = text.replace("\n", "   ")   # single-line fallback
                 self._apply_stacked_title(text)          # small-font 2-line (best-effort)
             else:
+                self._stacked_text = None
                 self.title = format_title(
                     active_email,
                     self.snapshot["active_usage"],
@@ -1177,10 +1187,12 @@ def run(switcher) -> int:
 
             return menu
 
-        def _apply_stacked_title(self, text):
+        def _apply_stacked_title(self, text) -> bool:
             """Render ``text`` as a small-font, multi-line attributed title on the
-            status-item button. Best-effort: any rumps/AppKit internal difference
-            silently leaves the single-line fallback already set on ``self.title``.
+            status-item button; return True on success, False otherwise (the
+            single-line fallback on ``self.title`` then stands). Re-asserted every
+            sync tick, so a failure is logged once at WARNING (visible in the
+            INFO-level claude-swap.log) rather than spamming or vanishing silently.
             The macOS menu bar is ~22px tall, so this suits ~2 short lines.
             """
             try:
@@ -1188,7 +1200,8 @@ def run(switcher) -> int:
                 import rumps
                 button = rumps.rumps.NSApp.nsstatusitem.button()
                 if button is None:
-                    return
+                    self._warn_stacked_once("status item button is None")
+                    return False
                 cell = button.cell()
                 cell.setUsesSingleLineMode_(False)
                 cell.setWraps_(True)
@@ -1229,14 +1242,23 @@ def run(switcher) -> int:
                 }
                 attr = AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
                 button.setAttributedTitle_(attr)
+                self._stacked_render_warned = False  # working — reset the warn gate
+                return True
             except Exception:
-                # Best-effort: the single-line fallback on self.title stays. Log the
-                # cause — swallowed silently before — so a render failure is
-                # diagnosable in claude-swap.log instead of an invisible collapse.
-                try:
-                    self.switcher._logger.debug("stacked title render failed", exc_info=True)
-                except Exception:
-                    pass
+                self._warn_stacked_once("render raised", exc_info=True)
+                return False
+
+        def _warn_stacked_once(self, msg, *, exc_info=False):
+            """Log the first stacked-title failure (with traceback) at WARNING so it
+            lands in the INFO-level log, then suppress repeats — the sync tick
+            retries every second — until a success resets the gate."""
+            if getattr(self, "_stacked_render_warned", False):
+                return
+            self._stacked_render_warned = True
+            try:
+                self.switcher._logger.warning("stacked title: %s", msg, exc_info=exc_info)
+            except Exception:
+                pass
 
         # ---- callbacks --------------------------------------------------------
         def _save_and_rebuild(self):
