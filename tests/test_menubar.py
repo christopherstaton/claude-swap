@@ -717,7 +717,20 @@ def test_format_stacked_title_two_accounts_active_marked():
     accts = [_stacked_acct("1", "personal@x.com", True, 35, "personal"),
              _stacked_acct("2", "work@x.com", False, 12, "work")]
     lines = menubar.format_stacked_title(accts, s, now=1000.0).split("\n")
-    assert lines == ["● personal · 65%", "  work · 88%"]
+    # Names left-justified into a column so the `·` and percentages align: "work"
+    # is padded to the width of "personal".
+    assert lines == ["● personal · 65%", "  work     · 88%"]
+
+
+def test_format_stacked_title_aligns_columns_and_right_justifies_pct():
+    # Unequal name lengths and unequal percent widths both align: shorter name
+    # padded to the longer, and the 1-digit percent right-justified under the
+    # 2-digit one so the numbers share a right edge.
+    s = menubar.MenuBarSettings(title_pct="5h")
+    accts = [_stacked_acct("1", "uchicago@x.com", True, 82, "uchicago"),
+             _stacked_acct("2", "tmw@x.com", False, 93, "tmw")]
+    lines = menubar.format_stacked_title(accts, s, now=1000.0).split("\n")
+    assert lines == ["● uchicago · 18%", "  tmw      ·  7%"]
 
 
 def test_format_stacked_title_shows_disabled_accounts():

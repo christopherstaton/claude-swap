@@ -591,22 +591,36 @@ def format_stacked_title(accounts, settings: MenuBarSettings, now: float | None 
     """
     if now is None:
         now = time.time()
-    lines: list[str] = []
+    # First pass: pull each account's name and usage segments. Every managed
+    # account gets a line — active or disabled. `cswap disable` only bars an
+    # account from auto-rotation; you still want both accounts' remaining quota
+    # visible at a glance, so the stacked title never hides a line.
+    rows: list[tuple[bool, str, list[str]]] = []
     for acct in accounts:
-        # Every managed account gets a line — active or disabled. `cswap disable`
-        # only bars an account from auto-rotation; you still want both accounts'
-        # remaining quota visible at a glance, so the stacked title never hides a
-        # line (a disabled account is not dropped — it's just off auto-switch).
         email, is_active, usage, alias = acct[1], acct[2], acct[3], acct[5]
         override = account_title_pct(settings, email)
         title_pct = override if override in TITLE_PCT_CHOICES else settings.title_pct
-        segs = [alias if alias else _local_part(email),
-                *_title_segments(usage, settings, now, title_pct)]
-        # A dot marks the active profile; others align under it. (The ⇄ swap glyph
-        # isn't used per-line in the stack — the dot is the active indicator.)
+        name = alias if alias else _local_part(email)
+        rows.append((is_active, name, _title_segments(usage, settings, now, title_pct)))
+    if not rows:
+        return ICON
+    # Second pass: align into columns. The name is left-justified to the widest
+    # name and each usage segment right-justified to its column's widest value,
+    # so the `·` separators and the percentages line up vertically. The menu bar
+    # glue renders this in a monospaced font, which is what makes the padding land
+    # on a true grid (a proportional font would drift). A dot marks the active
+    # profile; inactive rows use two spaces so every name starts at the same column.
+    name_w = max(len(name) for _, name, _ in rows)
+    seg_w: dict[int, int] = {}
+    for _, _, segs in rows:
+        for i, seg in enumerate(segs):
+            seg_w[i] = max(seg_w.get(i, 0), len(seg))
+    lines: list[str] = []
+    for is_active, name, segs in rows:
         marker = "● " if is_active else "  "
-        lines.append(marker + " · ".join(segs))
-    return "\n".join(lines) if lines else ICON
+        cells = [name.ljust(name_w), *(seg.rjust(seg_w[i]) for i, seg in enumerate(segs))]
+        lines.append(marker + " · ".join(cells))
+    return "\n".join(lines)
 
 
 def format_usage_log(email: str, usage: dict | str | None) -> str | None:
@@ -1181,10 +1195,23 @@ def run(switcher) -> int:
                 cell.setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
                 para = AppKit.NSMutableParagraphStyle.alloc().init()
                 para.setAlignment_(AppKit.NSTextAlignmentCenter)
+                # Uniform, tight line box (min == max) so the two lines fit the
+                # ~22px bar and sit centered, rather than riding high against the
+                # top with an oversized first line box.
+                para.setMinimumLineHeight_(10.0)
                 para.setMaximumLineHeight_(10.0)
                 para.setLineSpacing_(0.0)
+                # Monospaced so the column padding from format_stacked_title lands
+                # on a true grid — names, `·` separators and percentages line up.
+                # Fall back to the proportional menu-bar font if unavailable, so
+                # the two-line layout still renders (just without column alignment).
+                try:
+                    font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(
+                        9.0, AppKit.NSFontWeightRegular)
+                except Exception:
+                    font = AppKit.NSFont.menuBarFontOfSize_(9.0)
                 attrs = {
-                    AppKit.NSFontAttributeName: AppKit.NSFont.menuBarFontOfSize_(9.0),
+                    AppKit.NSFontAttributeName: font,
                     AppKit.NSParagraphStyleAttributeName: para,
                 }
                 attr = AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
