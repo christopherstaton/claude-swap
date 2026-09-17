@@ -96,7 +96,28 @@ class CswapApp(App):
             self.push_screen(WatchScreen())
         self.set_interval(self.POLL_INTERVAL_S, self._tick)
         self.set_interval(1.0, self._update_refresh_status)
+        self._prevent_app_nap()
         self._tick()
+
+    def _prevent_app_nap(self) -> None:
+        """Opt out of macOS App Nap so a backgrounded ``cswap watch`` keeps
+        polling. Without it, macOS throttles timers in non-foreground terminal
+        apps and the usage % freezes until you focus the window again; the poll
+        loop (and the shared-store read that keeps every instance current) simply
+        stops firing. Best-effort: held for the app's lifetime via the returned
+        activity token, and a silent no-op where Foundation isn't importable
+        (non-macOS, or a base install without the pyobjc dependency)."""
+        self._app_nap_activity = None
+        try:
+            from Foundation import NSActivityBackground, NSProcessInfo
+
+            # NSActivityBackground prevents App Nap while still allowing the system
+            # to idle-sleep — right for a background monitor, not a media app.
+            self._app_nap_activity = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                NSActivityBackground, "cswap keeps account usage current in the background"
+            )
+        except Exception:
+            pass
 
     # -- snapshot poll loop ---------------------------------------------------
 
