@@ -1,6 +1,6 @@
 [project]
 name = "claude-swap-cs"
-version = "0.27.0b1+fork17"
+version = "0.27.0b1+fork18"
 description = "Multi-account switcher for Claude Code (christopherstaton fork: menu bar, statusline, harvest, MCP)"
 readme = "README.md"
 requires-python = ">=3.12"
