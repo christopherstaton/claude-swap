@@ -1203,12 +1203,25 @@ def run(switcher) -> int:
                 para.setLineSpacing_(0.0)
                 # Monospaced so the column padding from format_stacked_title lands
                 # on a true grid — names, `·` separators and percentages line up.
-                # Fall back to the proportional menu-bar font if unavailable, so
-                # the two-line layout still renders (just without column alignment).
+                # `monospacedSystemFontOfSize_weight_` can *return None* (not raise)
+                # on some pyobjc builds, and a None font blows up the attributed
+                # string below — which the outer except then swallows, silently
+                # collapsing the whole title to the one-line fallback. So guard for
+                # None and step down: modern monospaced → classic fixed-pitch →
+                # proportional menu-bar font (last resort; loses column alignment
+                # but keeps the two lines).
+                font = None
                 try:
                     font = AppKit.NSFont.monospacedSystemFontOfSize_weight_(
                         9.0, AppKit.NSFontWeightRegular)
                 except Exception:
+                    font = None
+                if font is None:
+                    try:
+                        font = AppKit.NSFont.userFixedPitchFontOfSize_(9.0)
+                    except Exception:
+                        font = None
+                if font is None:
                     font = AppKit.NSFont.menuBarFontOfSize_(9.0)
                 attrs = {
                     AppKit.NSFontAttributeName: font,
@@ -1217,7 +1230,13 @@ def run(switcher) -> int:
                 attr = AppKit.NSAttributedString.alloc().initWithString_attributes_(text, attrs)
                 button.setAttributedTitle_(attr)
             except Exception:
-                pass
+                # Best-effort: the single-line fallback on self.title stays. Log the
+                # cause — swallowed silently before — so a render failure is
+                # diagnosable in claude-swap.log instead of an invisible collapse.
+                try:
+                    self.switcher._logger.debug("stacked title render failed", exc_info=True)
+                except Exception:
+                    pass
 
         # ---- callbacks --------------------------------------------------------
         def _save_and_rebuild(self):
