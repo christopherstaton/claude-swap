@@ -35,7 +35,7 @@ from claude_swap.settings import SETTING_SPECS, load_settings, parse_model_names
 from claude_swap.tui import data
 from claude_swap.tui.modals import ConfirmModal
 from claude_swap.tui.theme import Palette
-from claude_swap.tui.widgets import AccountsPanel
+from claude_swap.tui.widgets import AccountsPanel, draining_left
 
 if TYPE_CHECKING:
     from claude_swap.tui.app import CswapApp
@@ -317,7 +317,7 @@ class AutoScreen(Screen):
                 entry.append("  usage unknown", style=palette.muted)
                 ranked.append((999.0, acc.number))
             else:
-                entry.append(f"  {pct:3.0f}% used", style=palette.severity(pct))
+                entry.append(f"  {draining_left(pct):3.0f}% left", style=palette.severity(pct))
                 ranked.append((pct, acc.number))
             lines[acc.number] = entry
 

@@ -31,6 +31,13 @@ _BAR_EMPTY = "─"
 _BAR_TICK = "┃"
 
 
+def draining_left(used_pct: float) -> float:
+    """Remaining quota shown as a *draining* percentage: 100 − used, clamped to
+    ``[0, 100]``. The TUI mirrors the menu bar / statusline / ``cswap list``,
+    which all show what's LEFT (drains toward 0), not what's been used."""
+    return min(max(100.0 - used_pct, 0.0), 100.0)
+
+
 def bar_cells(
     pct: float | None,
     width: int,
@@ -39,18 +46,21 @@ def bar_cells(
     threshold: float | None = None,
     palette: Palette = Palette.DARK,
 ) -> Text:
-    """Just the bar glyphs: severity-colored fill, track, optional tick."""
+    """Bar glyphs for a *draining* gauge. ``pct`` is usage **used**; the bar
+    fills with what's LEFT (100 − used) so it drains as usage rises, colored by
+    severity of the *used* level (green when fresh, red near exhaustion)."""
     text = Text()
     if pct is None:
         text.append(_BAR_EMPTY * width, style=palette.track)
         return text
-    frac = min(max(pct, 0.0), 100.0) / 100.0
+    frac = draining_left(pct) / 100.0
     cells = frac * width
     full = int(cells)
     half = (cells - full) >= 0.5 and full < width
     tick_at: int | None = None
     if threshold is not None:
-        tick_at = min(width - 1, max(0, round(threshold / 100.0 * width)))
+        # threshold is a USED %; on a draining bar it sits at the remaining mark.
+        tick_at = min(width - 1, max(0, round(draining_left(threshold) / 100.0 * width)))
     color = palette.severity(pct)
     fill_style = f"{color} dim" if stale else color
     for i in range(width):
@@ -83,7 +93,7 @@ def usage_bar(
         text.append("  usage unknown", style=palette.muted)
     else:
         color = palette.severity(pct)
-        text.append(f" {pct:3.0f}%", style=f"{color} dim" if stale else color)
+        text.append(f" {draining_left(pct):3.0f}%", style=f"{color} dim" if stale else color)
     if suffix:
         text.append(f"  {suffix}", style=palette.muted)
     return text
@@ -281,7 +291,7 @@ def mini_account_text(
             text.append(" · ", style=palette.track)
         color = palette.severity(pct)
         text.append(f"{label} ", style=palette.muted)
-        text.append(f"{pct:.0f}%", style=f"{color} dim" if stale else color)
+        text.append(f"{draining_left(pct):.0f}%", style=f"{color} dim" if stale else color)
         if pct >= 100:
             reset = data.reset_text(window, now)
             if reset:

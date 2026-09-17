@@ -352,6 +352,26 @@ class TestFormatting:
         styles = {str(span.style) for span in text.spans}
         assert any(ACCENT_LIGHT in s for s in styles)  # active marker uses light accent
 
+    def test_draining_left_and_bars_show_remaining(self):
+        # The TUI mirrors the menu bar / statusline / `cswap list`: show what's
+        # LEFT (draining), not what's been used.
+        from claude_swap.tui.widgets import (
+            bar_cells,
+            draining_left,
+            mini_account_text,
+        )
+
+        assert draining_left(0.0) == 100.0     # fresh account: all quota left
+        assert draining_left(90.0) == 10.0     # 90% used → 10% left
+        assert draining_left(150.0) == 0.0     # overrun clamps to 0, never negative
+
+        # A 90%-used account (10% left) reads "5h 10%" and its bar drains near-empty.
+        acc = make_account(1, entry=make_entry(pct5=90.0, pct7=None))
+        assert "5h 10%" in mini_account_text(acc, time.time()).plain
+        fresh = bar_cells(10.0, 20).plain   # 10% used → mostly full (90% left)
+        spent = bar_cells(90.0, 20).plain   # 90% used → mostly empty (10% left)
+        assert fresh.count("━") > spent.count("━")
+
     def test_window_helpers(self):
         entry = make_entry(pct5=47.0)
         assert tui_data.window_pct(entry.last_good, "five_hour") == 47.0
@@ -721,7 +741,8 @@ class TestDashboard:
             panel = app.screen.query_one(AccountsPanel).render().plain
             assert "user1@example.com" in panel and "● active" in panel
             assert "resets" in panel  # the active card is the full one
-            assert "user2@example.com" in panel and "92%" in panel
+            # Draining: 92% used renders as 8% left.
+            assert "user2@example.com" in panel and "5h 8%" in panel
             # the mini line has no bars — bar glyphs only in the active card
             mini_part = panel.split("user2@example.com", 1)[1]
             assert "━" not in mini_part
@@ -767,7 +788,8 @@ class TestDashboard:
             assert "5h" in panel
             assert "7d" not in panel  # annual plan: no invented row
             assert "usage unknown" not in panel
-            assert "Fable" in panel and "62%" in panel
+            # Draining: 62% used renders as 38% left.
+            assert "Fable" in panel and "38%" in panel
 
     async def test_mini_line_skips_absent_window(self, tmp_path):
         fake = FakeSwitcher(
@@ -784,7 +806,7 @@ class TestDashboard:
 
             panel = app.screen.query_one(AccountsPanel).render().plain
             mini_part = panel.split("user2@example.com", 1)[1]
-            assert "5h 92%" in mini_part
+            assert "5h 8%" in mini_part  # draining: 92% used → 8% left
             assert "7d" not in mini_part
 
     async def test_menu_is_default_navigation_and_nests(self, tmp_path):
